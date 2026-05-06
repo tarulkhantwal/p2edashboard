@@ -17,7 +17,11 @@ st.set_page_config(
     page_title="Jira Issues Dashboard",
     page_icon="Adobe",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # Start collapsed — leadership lands on the dashboard charts immediately
+    # without a sidebar of filter controls in their face. The sidebar's
+    # expand button (top-left) gets a subtle bounce animation to invite
+    # discovery without nagging.
+    initial_sidebar_state="collapsed",
 )
 
 # -- Theme: Aurora -----------------------------------------------------------
@@ -92,6 +96,59 @@ st.markdown(
   [data-testid="stSidebar"] {{
     background: var(--surface);
     border-right: 1px solid var(--border);
+  }}
+
+  /* When the sidebar is collapsed, the expand control sits in the top-left.
+     Pulse it gently for the first few seconds to invite discovery without
+     nagging. Animation runs 4 times then stops — by then the user has either
+     noticed it or is happily reading the dashboard.
+
+     Targets both element ids Streamlit uses across versions:
+     - stSidebarCollapsedControl (older builds)
+     - stSidebarCollapseButton    (newer builds)
+     - And the icon path inside, in case the wrapper is non-targetable. */
+  @keyframes sidebar-attention-bounce {{
+    0%, 100% {{
+      transform: translateX(0);
+      box-shadow: 0 1px 2px rgba(124, 111, 232, 0.12);
+    }}
+    25% {{
+      transform: translateX(4px);
+      box-shadow: 0 2px 12px rgba(124, 111, 232, 0.45);
+    }}
+    50% {{
+      transform: translateX(0);
+      box-shadow: 0 1px 2px rgba(124, 111, 232, 0.12);
+    }}
+    75% {{
+      transform: translateX(2px);
+      box-shadow: 0 2px 8px rgba(124, 111, 232, 0.30);
+    }}
+  }}
+  @keyframes sidebar-attention-glow {{
+    0%, 100% {{
+      background: rgba(124, 111, 232, 0.00);
+    }}
+    50% {{
+      background: rgba(124, 111, 232, 0.18);
+    }}
+  }}
+
+  /* Pulse the expand button after page load. animation-iteration-count: 4
+     means the bounce plays four times (~5 seconds) and then settles. */
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapseButton"],
+  [data-testid="collapsedControl"] {{
+    animation: sidebar-attention-bounce 1.2s ease-in-out 4 !important;
+    animation-delay: 0.6s !important;
+    border-radius: 8px !important;
+    transition: all 0.2s ease;
+  }}
+  [data-testid="stSidebarCollapsedControl"]:hover,
+  [data-testid="stSidebarCollapseButton"]:hover,
+  [data-testid="collapsedControl"]:hover {{
+    background: rgba(124, 111, 232, 0.10) !important;
+    transform: translateX(2px);
   }}
 
   [data-testid="stSidebar"] h1,

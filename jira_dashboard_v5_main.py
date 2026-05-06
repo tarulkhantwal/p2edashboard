@@ -559,7 +559,9 @@ def quarter_label_sort_key(label: str):
     return (int(match.group(2)), int(match.group(1)), str(label))
 
 
-def load_issue_data(source) -> pd.DataFrame:
+def _parse_issue_source(source) -> pd.DataFrame:
+    """Inner parser — actually does the Excel/CSV reading and quarter
+    bucketing. Both the cached and uncached entry points call this."""
     rewind_source(source)
     name = source if isinstance(source, str) else source.name
     is_excel = str(name).lower().endswith((".xlsx", ".xls"))
@@ -646,6 +648,31 @@ def load_issue_data(source) -> pd.DataFrame:
 
     df = parse_date_columns(df)
     return df
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _parse_issue_source_from_path(path: str, mtime: float) -> pd.DataFrame:
+    """Cacheable variant for string paths on disk. The cache key includes
+    the file's modification time so editing the source Excel auto-invalidates
+    the cache — no manual clear needed when new data lands.
+    Streamlit Cloud has a ~1GB RAM limit; this prevents re-parsing the
+    Excel on every rerun (which was contributing to OOM kills)."""
+    return _parse_issue_source(path)
+
+
+def load_issue_data(source) -> pd.DataFrame:
+    """Public entry point. Routes string paths through the cached
+    parser; UploadedFile objects (sidebar drag-and-drop) get parsed
+    fresh because they're not safely hashable."""
+    if isinstance(source, str):
+        try:
+            mtime = os.path.getmtime(source)
+            return _parse_issue_source_from_path(source, mtime)
+        except Exception:
+            # If anything goes wrong (file gone, race, etc.), fall back
+            # to the direct parser so the app keeps working
+            pass
+    return _parse_issue_source(source)
 
 
 def build_reporting_period_options(frame: pd.DataFrame):

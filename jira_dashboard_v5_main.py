@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from datetime import datetime
 
 import pandas as pd
@@ -824,41 +825,27 @@ def section(title: str):
 
 def make_xlsx_bytes(frame: pd.DataFrame, sheet_name: str = "Issues") -> bytes:
     """Convert a dataframe to .xlsx bytes for download_button.
-    Uses openpyxl which is already in our requirements. Sheet names are
-    sanitized — Excel limits them to 31 chars and forbids :\\/?*[].
-
-    Excel files do NOT support timezone-aware datetimes. pandas raises
-    `ValueError: Excel does not support datetimes with timezones` if any
-    cell is tz-aware. Local exports often have naive datetimes, but the
-    same source file read in a different pandas/python version (e.g. on
-    Streamlit Cloud) may produce tz-aware datetimes. We strip tz info
-    defensively before writing to make the export environment-agnostic.
+    Strips timezone info from datetime columns because Excel does not
+    support tz-aware datetimes (pandas raises ValueError if any cell
+    is tz-aware). Wall-clock time is preserved.
     """
     from io import BytesIO
     safe_sheet = re.sub(r"[:\\/?*\[\]]", "_", str(sheet_name))[:31] or "Issues"
 
     # Defensive copy + strip timezones from any datetime column.
-    # `tz_localize(None)` drops the timezone but keeps the wall-clock value,
-    # which is what users expect to see in Excel.
     safe_frame = frame.copy()
     for col in safe_frame.columns:
         s = safe_frame[col]
-        # Standard tz-aware datetime64 columns. Use isinstance check rather
-        # than the deprecated `is_datetime64tz_dtype` helper.
         if isinstance(s.dtype, pd.DatetimeTZDtype):
             safe_frame[col] = s.dt.tz_localize(None)
-        # Object columns may contain mixed Python datetime objects with tzinfo
         elif s.dtype == "object":
             try:
-                # Cheap probe: check first non-null value
                 first_val = s.dropna().head(1)
                 if len(first_val) and getattr(first_val.iloc[0], "tzinfo", None) is not None:
                     safe_frame[col] = s.apply(
                         lambda v: v.replace(tzinfo=None) if hasattr(v, "tzinfo") and v is not None and getattr(v, "tzinfo", None) is not None else v
                     )
             except Exception:
-                # If anything goes sideways probing the column, leave it alone —
-                # the writer will surface a clearer error than we'd raise here
                 pass
 
     buf = BytesIO()
@@ -1065,6 +1052,74 @@ with st.sidebar:
 
     all_validity = sorted(df_period["Validity"].dropna().unique()) if "Validity" in df_period.columns else []
     sel_validity = st.multiselect("Validity", all_validity, default=all_validity)
+
+    # ─── Diagnostics (collapsed by default) ────────────────────────────
+    # Tucked at the bottom of the sidebar so leadership won't see it
+    # unless they explicitly expand it. Useful for spotting memory creep
+    # on Streamlit Cloud (~1 GB free-tier limit) before it crashes the app.
+    with st.expander("⚙ Diagnostics", expanded=False):
+        try:
+            import psutil
+            proc = psutil.Process()
+            mem_mb = proc.memory_info().rss / 1024 / 1024
+            cpu_pct = proc.cpu_percent(interval=0.05)
+
+            # Memory readout — color the value if we're approaching the
+            # Streamlit Cloud free-tier limit (~1024 MB).
+            if mem_mb > 800:
+                mem_color = CHART_TERRACOTTA_DEEP
+                mem_status = "⚠ approaching limit"
+            elif mem_mb > 600:
+                mem_color = CHART_HONEY_DEEP
+                mem_status = "elevated"
+            else:
+                mem_color = CHART_EMERALD
+                mem_status = "healthy"
+
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};'
+                f'letter-spacing:0.08em;text-transform:uppercase;font-weight:700;margin:4px 0 2px 0;">Memory</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:1.4rem;'
+                f'font-weight:600;color:{mem_color};line-height:1.1;">{mem_mb:.0f} <span style="font-size:0.7rem;color:{MUTED};">MB</span></div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.72rem;color:{MUTED};margin-bottom:10px;">{mem_status} · ~1024 MB cap on free tier</div>',
+                unsafe_allow_html=True,
+            )
+
+            # CPU readout
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};'
+                f'letter-spacing:0.08em;text-transform:uppercase;font-weight:700;margin:4px 0 2px 0;">CPU</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:1.4rem;'
+                f'font-weight:600;color:{INK};line-height:1.1;">{cpu_pct:.1f}<span style="font-size:0.7rem;color:{MUTED};">%</span></div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.72rem;color:{MUTED};margin-bottom:10px;">last 50 ms</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Row count of the current filtered view
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};'
+                f'letter-spacing:0.08em;text-transform:uppercase;font-weight:700;margin:4px 0 2px 0;">Rows in view</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:1.4rem;'
+                f'font-weight:600;color:{INK};line-height:1.1;">{len(df_period):,}</div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.72rem;color:{MUTED};margin-bottom:10px;">after period filter</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Cache stats — useful for confirming the data load is cached
+            st.caption(
+                f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} · "
+                f"PID {proc.pid}"
+            )
+
+            if st.button("Clear data cache", key="clear_cache_btn"):
+                st.cache_data.clear()
+                st.success("Cache cleared. The app will re-parse the source on the next interaction.")
+        except ImportError:
+            st.caption(
+                "Install `psutil` in requirements.txt to enable live memory and CPU readouts."
+            )
+        except Exception as e:
+            st.caption(f"Diagnostics unavailable: {e}")
 
 # -- Apply sidebar filters ----------------------------------------------------
 df = df_period.copy()

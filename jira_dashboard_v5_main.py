@@ -742,12 +742,44 @@ def make_xlsx_bytes(frame: pd.DataFrame, sheet_name: str = "Issues") -> bytes:
     """Convert a dataframe to .xlsx bytes for download_button.
     Uses openpyxl which is already in our requirements. Sheet names are
     sanitized — Excel limits them to 31 chars and forbids :\\/?*[].
+
+    Excel files do NOT support timezone-aware datetimes. pandas raises
+    `ValueError: Excel does not support datetimes with timezones` if any
+    cell is tz-aware. Local exports often have naive datetimes, but the
+    same source file read in a different pandas/python version (e.g. on
+    Streamlit Cloud) may produce tz-aware datetimes. We strip tz info
+    defensively before writing to make the export environment-agnostic.
     """
     from io import BytesIO
     safe_sheet = re.sub(r"[:\\/?*\[\]]", "_", str(sheet_name))[:31] or "Issues"
+
+    # Defensive copy + strip timezones from any datetime column.
+    # `tz_localize(None)` drops the timezone but keeps the wall-clock value,
+    # which is what users expect to see in Excel.
+    safe_frame = frame.copy()
+    for col in safe_frame.columns:
+        s = safe_frame[col]
+        # Standard tz-aware datetime64 columns. Use isinstance check rather
+        # than the deprecated `is_datetime64tz_dtype` helper.
+        if isinstance(s.dtype, pd.DatetimeTZDtype):
+            safe_frame[col] = s.dt.tz_localize(None)
+        # Object columns may contain mixed Python datetime objects with tzinfo
+        elif s.dtype == "object":
+            try:
+                # Cheap probe: check first non-null value
+                first_val = s.dropna().head(1)
+                if len(first_val) and getattr(first_val.iloc[0], "tzinfo", None) is not None:
+                    safe_frame[col] = s.apply(
+                        lambda v: v.replace(tzinfo=None) if hasattr(v, "tzinfo") and v is not None and getattr(v, "tzinfo", None) is not None else v
+                    )
+            except Exception:
+                # If anything goes sideways probing the column, leave it alone —
+                # the writer will surface a clearer error than we'd raise here
+                pass
+
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        frame.to_excel(writer, sheet_name=safe_sheet, index=False)
+        safe_frame.to_excel(writer, sheet_name=safe_sheet, index=False)
     return buf.getvalue()
 
 

@@ -2698,6 +2698,115 @@ with tab5:
                         _calc_body(**body)
                         break
 
+    # ─── Live numbers computed from the currently filtered dataframe ──────
+    # The "Worked example" sections used to be hardcoded ("265 Valid + 37
+    # Invalid"), which became confusing when leadership saw a chart showing
+    # 134 Valid but read an example with 265. We now compute these live so
+    # the documentation always matches whatever the user is currently
+    # viewing — period dropdown and sidebar filters all flow through.
+    _ex_total = len(df)
+    _ex_period = reporting_period
+
+    def _ex_pct(num, den):
+        return f"{(num / den * 100) if den else 0:.0f}"
+
+    _ex_p1 = int((df["Priority_Short"] == "P1").sum()) if "Priority_Short" in df.columns else 0
+    _ex_valid = int((df["Validity"].astype(str).str.strip().str.lower() == "valid").sum()) if "Validity" in df.columns else 0
+    _ex_invalid = int((df["Validity"].astype(str).str.strip().str.lower() == "invalid").sum()) if "Validity" in df.columns else 0
+    _ex_bug = int(df["Type of Request"].astype(str).str.strip().str.lower().eq("bug").sum()) if "Type of Request" in df.columns else 0
+    _ex_rfh = int(df["Type of Request"].astype(str).str.strip().str.lower().eq("request for help").sum()) if "Type of Request" in df.columns else 0
+
+    # Bug ↔ Validity cross for the Type of Request stacked bar example
+    _ex_bug_valid = 0
+    _ex_bug_invalid = 0
+    if "Type of Request" in df.columns and "Validity" in df.columns:
+        _bug_mask = df["Type of Request"].astype(str).str.strip().str.lower().eq("bug")
+        _ex_bug_valid = int(((_bug_mask) & (df["Validity"].astype(str).str.strip().str.lower() == "valid")).sum())
+        _ex_bug_invalid = int(((_bug_mask) & (df["Validity"].astype(str).str.strip().str.lower() == "invalid")).sum())
+
+    # Classification accuracy figures (Quality tab)
+    _class_col = "Correct / Incorrect classification? RFH/Bug"
+    _ex_bug_correct = _ex_bug_incorrect = _ex_rfh_correct = _ex_rfh_incorrect = 0
+    _ex_bug_acc = _ex_rfh_acc = 0
+    if _class_col in df.columns and "Type of Request" in df.columns:
+        _bm = df["Type of Request"].astype(str).str.strip().str.lower().eq("bug")
+        _rm = df["Type of Request"].astype(str).str.strip().str.lower().eq("request for help")
+        _cm = df[_class_col].astype(str).str.strip().str.lower().eq("correct")
+        _im = df[_class_col].astype(str).str.strip().str.lower().eq("incorrect")
+        _ex_bug_correct = int((_bm & _cm).sum())
+        _ex_bug_incorrect = int((_bm & _im).sum())
+        _ex_rfh_correct = int((_rm & _cm).sum())
+        _ex_rfh_incorrect = int((_rm & _im).sum())
+        _bt = _ex_bug_correct + _ex_bug_incorrect
+        _rt = _ex_rfh_correct + _ex_rfh_incorrect
+        _ex_bug_acc = int(_ex_bug_correct / _bt * 100) if _bt else 0
+        _ex_rfh_acc = int(_ex_rfh_correct / _rt * 100) if _rt else 0
+
+    # Top affects versions
+    _ex_top_versions_text = ""
+    if "Affects Version" in df.columns:
+        _v = df["Affects Version"].dropna().astype(str).str.strip()
+        _v = _v[_v != ""].value_counts().head(3)
+        if not _v.empty:
+            _ex_top_versions_text = ", ".join(f"{name} has {cnt}" for name, cnt in _v.items())
+
+    # Top root cause
+    _ex_top_root_text = ""
+    if "Root Cause Resolution" in df.columns:
+        _r = df["Root Cause Resolution"].dropna().astype(str).str.strip()
+        _r = _r[_r != ""].value_counts().head(2)
+        if len(_r) >= 1:
+            parts = [f"'{name}' appears {cnt} times" for name, cnt in _r.items()]
+            _ex_top_root_text = " and ".join(parts)
+
+    # Top components (split by , ; \n)
+    _ex_top_components_text = ""
+    if "Component/s" in df.columns:
+        _comps = []
+        for v in df["Component/s"].dropna():
+            for p in re.split(r"[,;\n]+", str(v)):
+                p = p.strip()
+                if p:
+                    _comps.append(p)
+        if _comps:
+            _cs = pd.Series(_comps).value_counts().head(3)
+            _ex_top_components_text = ", ".join(f"{name}: {cnt} issues" for name, cnt in _cs.items())
+
+    # Scope for Deflection
+    _ex_scope_text = ""
+    if "Scope for Deflection" in df.columns:
+        _s = df["Scope for Deflection"].dropna().astype(str).str.strip()
+        _s = _s[_s != ""].value_counts()
+        if not _s.empty:
+            _ex_scope_text = ", ".join(f"{name}: {cnt}" for name, cnt in _s.items())
+
+    # Top R&D engineers
+    _ex_top_engineers_text = ""
+    if "R&D Engineer" in df.columns:
+        _e = df["R&D Engineer"].dropna().astype(str).str.strip()
+        _e = _e[_e != ""].value_counts().head(3)
+        if not _e.empty:
+            _ex_top_engineers_text = ", ".join(f"{name}: {cnt}" for name, cnt in _e.items())
+
+    # Top customers (from JIRA_Created — separate dataset)
+    _ex_top_customers_text = ""
+    try:
+        if df_jira_created is not None and not df_jira_created.empty and "Customer" in df_jira_created.columns:
+            _df_jc_local = df_jira_created.copy()
+            if "Quarter" in _df_jc_local.columns:
+                _df_jc_local["Source Sheet"] = _df_jc_local["Quarter"].astype(str).str.strip()
+                _df_jc_local["Quarter Label"] = _df_jc_local["Source Sheet"].map(sheet_to_quarter_label)
+            try:
+                _df_jc_local = apply_reporting_period(_df_jc_local, reporting_period, period_map)
+            except Exception:
+                pass
+            _c = _df_jc_local["Customer"].dropna().astype(str).str.strip()
+            _c = _c[_c != ""].value_counts().head(4)
+            if not _c.empty:
+                _ex_top_customers_text = ", ".join(f"{name} ({cnt})" for name, cnt in _c.items())
+    except Exception:
+        pass
+
     # ─── Card 1: KPI strip ───────────────────────────────────────────────
     _calc_card(
         "KPI strip · top of every page",
@@ -2707,20 +2816,20 @@ with tab5:
                 what="The total number of issues in the current view (after period and sidebar filters).",
                 source="Every row in the loaded quarter sheets (e.g. <code>Q1_2026</code>, <code>Q2_2026</code>).",
                 how="A simple row count: <code>len(filtered_dataframe)</code>.",
-                example="If the period is set to <b>Q2 2026</b> and no sidebar filters are applied, this counts all 162 rows in the Q2_2026 sheet.",
+                example=f"In the current view (<b>{_ex_period}</b>), this counts <b>{_ex_total:,}</b> rows.",
             )),
             ("p1", "P1 critical", dict(
                 what="Number of issues whose priority is P1, the highest tier (mission-critical).",
                 source="<code>Priority</code> column. Long descriptions like 'P1 - Relationship is at risk…' are normalized to short codes (P1, P2, P3, P4) inside the dashboard.",
                 how="Counts rows where <code>Priority_Short == 'P1'</code>. The percentage shown is <code>P1_count ÷ total_issues × 100</code>.",
-                example="If 60 of 162 Q2 issues are tagged P1, this card shows <b>60</b> with caption <b>37% of total</b>.",
+                example=f"In <b>{_ex_period}</b>, <b>{_ex_p1}</b> of {_ex_total:,} issues are tagged P1 → caption shows <b>{_ex_pct(_ex_p1, _ex_total)}% of total</b>.",
             )),
             ("valid", "Valid", dict(
                 what="Number of issues marked as a legitimate concern after triage.",
                 source="<code>Validity</code> column.",
                 how="Counts rows where Validity (trimmed and case-insensitive) equals <code>'valid'</code>. "
                     "Percentage is <code>valid_count ÷ total_issues × 100</code>.",
-                example="In Q2 2026, 139 of 162 issues are tagged Valid → <b>139</b> with caption <b>86% of total</b>.",
+                example=f"In <b>{_ex_period}</b>, <b>{_ex_valid}</b> of {_ex_total:,} issues are tagged Valid → caption shows <b>{_ex_pct(_ex_valid, _ex_total)}% of total</b>.",
                 edge="Rows where Validity is blank, NaN, or any value other than 'Valid' or 'Invalid' are not counted.",
             )),
             ("bugs", "Bugs", dict(
@@ -2729,14 +2838,14 @@ with tab5:
                 how="Counts rows where <code>Type of Request</code> (trimmed and case-insensitive) equals <code>'bug'</code>. "
                     "Note: this uses Type of Request directly, NOT the 'Correct / Incorrect classification? RFH/Bug' "
                     "column (which only contains 'Correct' or 'Incorrect' and tells you whether the categorization was right).",
-                example="In Q2 2026, 50 of 162 issues are tagged Bug → <b>50</b> with caption <b>31% of total</b>.",
+                example=f"In <b>{_ex_period}</b>, <b>{_ex_bug}</b> of {_ex_total:,} issues are tagged Bug → caption shows <b>{_ex_pct(_ex_bug, _ex_total)}% of total</b>.",
             )),
             ("rfh", "RFH", dict(
                 what="Number of issues classified as a Request for Help (i.e., not a Bug).",
                 source="<code>Type of Request</code> column.",
                 how="Counts rows where <code>Type of Request</code> (trimmed and case-insensitive) equals <code>'request for help'</code>. "
                     "Together with the Bugs KPI, these two categories cover the full population of typed issues.",
-                example="In Q2 2026, 112 of 162 issues are tagged Request for Help → <b>112</b> with caption <b>69% of total</b>.",
+                example=f"In <b>{_ex_period}</b>, <b>{_ex_rfh}</b> of {_ex_total:,} issues are tagged Request for Help → caption shows <b>{_ex_pct(_ex_rfh, _ex_total)}% of total</b>.",
             )),
         ],
     )
@@ -2750,49 +2859,49 @@ with tab5:
                 what="Two-slice donut showing the share of Valid vs Invalid issues.",
                 source="<code>Validity</code> column.",
                 how="Counts each Validity value, then renders as a donut. The percentage shown on each slice is rounded to whole numbers (e.g. 88% rather than 87.7%).",
-                example="265 Valid + 37 Invalid → 88% Valid slice (emerald) and 12% Invalid slice (terracotta).",
+                example=f"<b>{_ex_valid} Valid</b> + <b>{_ex_invalid} Invalid</b> → <b>{_ex_pct(_ex_valid, _ex_valid + _ex_invalid)}% Valid</b> slice (emerald) and <b>{_ex_pct(_ex_invalid, _ex_valid + _ex_invalid)}% Invalid</b> slice (terracotta).",
                 edge="Validity values other than 'Valid' or 'Invalid' (blanks, NaN) are excluded from the donut.",
             )),
             ("type", "Type of request (stacked bar)", dict(
                 what="Total issues per request type (Bug, Request for Help), with each bar split into Valid + Invalid segments.",
                 source="<code>Type of Request</code> and <code>Validity</code> columns.",
                 how="Cross-tabulates Type × Validity, then plots a stacked bar with Type on the x-axis. Stack order: Valid first (bottom), then Invalid (top). The y-axis is total count of issues for that type.",
-                example="Bug: 60 Valid + 37 Invalid → emerald 60 stacked under terracotta 37 = total bar height 97.",
+                example=f"Bug: <b>{_ex_bug_valid} Valid</b> + <b>{_ex_bug_invalid} Invalid</b> → emerald {_ex_bug_valid} stacked under terracotta {_ex_bug_invalid} = total bar height <b>{_ex_bug_valid + _ex_bug_invalid}</b>.",
                 edge="Rows with blank Type of Request are excluded.",
             )),
             ("version", "Version distribution (bar chart)", dict(
                 what="Top affected versions ordered by issue count.",
                 source="<code>Affects Version</code> column.",
                 how="Counts how many issues mention each version, then keeps the top 8 by count. Numeric versioning is sorted naturally (so 8.6.4 > 8.6.10 lexically would be wrong — we sort by count instead).",
-                example="If 8.6.4 has 76 issues, 8.9.2 has 38, and so on, the chart shows them ordered by count.",
+                example=(f"In the current view: {_ex_top_versions_text} — the chart shows them ordered by count." if _ex_top_versions_text else "Versions are sorted by count and the top 8 are shown."),
                 edge="A row can list multiple versions in one cell separated by commas — each one is counted independently.",
             )),
             ("rootcause", "Root cause resolution breakdown (bar chart)", dict(
                 what="Distribution of root cause categories across all issues.",
                 source="<code>Root Cause Resolution</code> column.",
                 how="Counts each unique value, sorts by frequency, displays as a horizontal bar chart for readability of long category names.",
-                example="If 'Configuration issue' appears 45 times and 'Product defect' appears 33 times, those become the top two bars.",
+                example=(f"In the current view: {_ex_top_root_text} — those become the top bars." if _ex_top_root_text else "The most common root cause categories rise to the top."),
                 edge="Rows with blank Root Cause Resolution are excluded.",
             )),
             ("component", "Component distribution (lollipop chart)", dict(
                 what="Top components affected by issues, displayed as a Bloomberg-style lollipop chart for visual distinction.",
                 source="<code>Component/s</code> column.",
                 how="Splits cells with multiple components (separated by commas, semicolons, or newlines), counts each unique component, keeps the top 12.",
-                example="Workflow - Campaigns: 35 issues, Channel - Email: 29 issues, Reporting: 26 issues, etc.",
+                example=(f"In the current view: {_ex_top_components_text}." if _ex_top_components_text else "The 12 most-mentioned components are shown."),
                 edge="A row listing 'A, B, C' contributes to all three components' counts. This avoids hiding components that travel together.",
             )),
             ("volume", "Volume trend (line chart)", dict(
                 what="Issue creation volume over time, by month.",
                 source="<code>Resolution Date</code> column.",
                 how="Groups issues by month of resolution, counts per month, plots as a line chart with steel-blue area fill below.",
-                example="Dec 2025: 25 issues, Jan 2026: 32 issues, Feb 2026: 28 issues — three points on the line.",
+                example="Each month becomes a point on the line — for example, Jan 2026: 32 issues, Feb 2026: 28 issues. The chart's hover tooltip shows the exact count per month.",
                 edge="Rows with missing Resolution Date are excluded.",
             )),
             ("customers", "Top customers by JIRA volume (bar chart)", dict(
                 what="Top 12 customers ranked by how many P2E Jiras they raised in the selected period.",
                 source="<code>JIRA_Created</code> sheet (a separate dataset from the quarter sheets). Uses the <code>Customer</code> column.",
                 how="Counts Jiras per Customer, sorts descending, keeps the top 12. The chart respects the same reporting period as the rest of the dashboard — selecting Q2 2026 shows top customers for Q2 only.",
-                example="In Q2 2026: MICROSOFT - MSCOM (9), H&amp;M (8), MASHREQ BANK (7), KASIKORNBANK PUBLIC COMPANY (6).",
+                example=(f"In <b>{_ex_period}</b>: {_ex_top_customers_text}." if _ex_top_customers_text else "Customers are ranked by Jira count for the selected period."),
                 edge="Customer entries are taken as-is from the source — different casings or formats (e.g. 'Microsoft - MSCOM' vs 'MICROSOFT - MSCOM') count as distinct customers because that's how the data team labels them upstream.",
             )),
         ],
@@ -2817,14 +2926,14 @@ with tab5:
                 what="Per Type of Request (Bug, RFH), shows what fraction were classified Correctly vs Incorrectly.",
                 source="<code>Type of Request</code> and <code>Correct / Incorrect classification? RFH/Bug</code> columns.",
                 how="Cross-tabulates Type × Correct/Incorrect, then plots stacked bar. Each bar's full height is the type's total; the green segment is Correct, red is Incorrect.",
-                example="Bug: 60 Correct + 37 Incorrect = 62% accuracy. RFH: 183 Correct + 22 Incorrect = 89% accuracy.",
+                example=f"In the current view — Bug: <b>{_ex_bug_correct} Correct + {_ex_bug_incorrect} Incorrect</b> = <b>{_ex_bug_acc}% accuracy</b>. RFH: <b>{_ex_rfh_correct} Correct + {_ex_rfh_incorrect} Incorrect</b> = <b>{_ex_rfh_acc}% accuracy</b>.",
                 edge="Rows where the classification cell is blank or has any value other than 'Correct'/'Incorrect' are excluded from this chart.",
             )),
             ("scope", "Scope for deflection (bar chart)", dict(
                 what="Counts of issues categorized as deflectable (Yes), not deflectable (No), or partially (Yes/No).",
                 source="<code>Scope for Deflection</code> column.",
                 how="Direct value counts of the Scope for Deflection column, plotted as a single horizontal bar chart.",
-                example="No: 223, Yes/No: 43, Yes: 36 — three bars in descending order.",
+                example=(f"In the current view: {_ex_scope_text} — the chart shows these in descending order." if _ex_scope_text else "Bars are sorted from most-frequent value to least."),
                 edge="Blank values are excluded.",
             )),
         ],
@@ -2839,7 +2948,7 @@ with tab5:
                 what="Top 12 R&D engineers by number of assigned issues.",
                 source="<code>R&D Engineer</code> column.",
                 how="Counts how many issues each R&D engineer is assigned to, sorts descending, keeps the top 12.",
-                example="Milos Manic: 23 issues, Camilo Medina: 15, Bastien Armand: 13.",
+                example=(f"In the current view: {_ex_top_engineers_text}." if _ex_top_engineers_text else "The 12 engineers with the most assigned issues are shown."),
                 edge="Rows with blank R&D Engineer are excluded.",
             )),
             ("primix", "Priority mix per engineer (stacked bar)", dict(
@@ -2887,7 +2996,7 @@ with tab5:
                 how="Each quarter sheet (e.g. <code>Q1_2026</code>) is loaded and tagged with a display label (<code>Q1 2026</code>). "
                     "When the dropdown changes, the dashboard filters rows by their tagged label. <code>All Data</code> applies no filter. "
                     "<code>H1 FY26</code> = Q1 + Q2 of fiscal year 26. <code>H2 FY26</code> = Q3 + Q4.",
-                example="Selecting <code>Q2 2026</code> shows only the 162 rows that came from the Q2_2026 sheet.",
+                example=f"Selecting a single quarter shows only the rows that came from that quarter's sheet. Currently <b>{_ex_period}</b> is selected, showing <b>{_ex_total:,}</b> rows.",
                 edge="The dashboard does NOT do its own date math to figure out which quarter a row belongs to — "
                      "it trusts the sheet name. So if a row is in the Q2_2026 sheet, it's treated as Q2 2026 regardless "
                      "of what its Resolution Date says. This is intentional: your upstream Python script already does the "

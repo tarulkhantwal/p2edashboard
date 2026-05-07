@@ -11,7 +11,7 @@ import streamlit as st
 
 # -- Default path config (edit these if the file moves) -----------------------
 DEFAULT_FOLDER = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE = "JIRA_Report_Resolution1_2026.xlsx"
+DEFAULT_FILE = "JIRA_Report_Resolution_2026_resdate.xlsx"
 
 # -- Page config --------------------------------------------------------------
 st.set_page_config(
@@ -825,27 +825,41 @@ def section(title: str):
 
 def make_xlsx_bytes(frame: pd.DataFrame, sheet_name: str = "Issues") -> bytes:
     """Convert a dataframe to .xlsx bytes for download_button.
-    Strips timezone info from datetime columns because Excel does not
-    support tz-aware datetimes (pandas raises ValueError if any cell
-    is tz-aware). Wall-clock time is preserved.
+    Uses openpyxl which is already in our requirements. Sheet names are
+    sanitized — Excel limits them to 31 chars and forbids :\\/?*[].
+
+    Excel files do NOT support timezone-aware datetimes. pandas raises
+    `ValueError: Excel does not support datetimes with timezones` if any
+    cell is tz-aware. Local exports often have naive datetimes, but the
+    same source file read in a different pandas/python version (e.g. on
+    Streamlit Cloud) may produce tz-aware datetimes. We strip tz info
+    defensively before writing to make the export environment-agnostic.
     """
     from io import BytesIO
     safe_sheet = re.sub(r"[:\\/?*\[\]]", "_", str(sheet_name))[:31] or "Issues"
 
     # Defensive copy + strip timezones from any datetime column.
+    # `tz_localize(None)` drops the timezone but keeps the wall-clock value,
+    # which is what users expect to see in Excel.
     safe_frame = frame.copy()
     for col in safe_frame.columns:
         s = safe_frame[col]
+        # Standard tz-aware datetime64 columns. Use isinstance check rather
+        # than the deprecated `is_datetime64tz_dtype` helper.
         if isinstance(s.dtype, pd.DatetimeTZDtype):
             safe_frame[col] = s.dt.tz_localize(None)
+        # Object columns may contain mixed Python datetime objects with tzinfo
         elif s.dtype == "object":
             try:
+                # Cheap probe: check first non-null value
                 first_val = s.dropna().head(1)
                 if len(first_val) and getattr(first_val.iloc[0], "tzinfo", None) is not None:
                     safe_frame[col] = s.apply(
                         lambda v: v.replace(tzinfo=None) if hasattr(v, "tzinfo") and v is not None and getattr(v, "tzinfo", None) is not None else v
                     )
             except Exception:
+                # If anything goes sideways probing the column, leave it alone —
+                # the writer will surface a clearer error than we'd raise here
                 pass
 
     buf = BytesIO()
@@ -1090,7 +1104,7 @@ with st.sidebar:
                 f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};'
                 f'letter-spacing:0.08em;text-transform:uppercase;font-weight:700;margin:4px 0 2px 0;">CPU</div>'
                 f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:1.4rem;'
-                f'font-weight:600;color:{INK};line-height:1.1;">{cpu_pct:.1f}<span style="font-size:0.7rem;color:{MUTED};">%</span></div>'
+                f'font-weight:600;color:{INK};line-height:1.1;">{cpu_pct:.0f}<span style="font-size:0.7rem;color:{MUTED};">%</span></div>'
                 f'<div style="font-family:Inter,sans-serif;font-size:0.72rem;color:{MUTED};margin-bottom:10px;">last 50 ms</div>',
                 unsafe_allow_html=True,
             )
@@ -1233,7 +1247,7 @@ with tab1:
             # Prevents "where did the missing rows go?" confusion.
             st.markdown(
                 f'<div style="font-family:IBM Plex Mono,monospace;font-size:0.78rem;color:{MUTED};letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px">'
-                f'<b style="color:{INK}">{valid_pct:.1f}%</b> valid &nbsp;·&nbsp; '
+                f'<b style="color:{INK}">{valid_pct:.0f}%</b> valid &nbsp;·&nbsp; '
                 f'<b style="color:{INK}">{valid_n:,}</b> valid &nbsp;·&nbsp; '
                 f'<b style="color:{INK}">{invalid_n:,}</b> invalid &nbsp;·&nbsp; '
                 f'<b style="color:{INK}">{total:,}</b> total</div>',
@@ -1248,7 +1262,7 @@ with tab1:
                 color_discrete_map=VALIDITY_COLORS,
             )
             fig.update_traces(
-                textinfo="percent+label",
+                texttemplate="%{label}<br>%{percent:.0%}",
                 textfont=dict(color=INK, size=14, family="Inter"),
                 marker=dict(line=dict(color="#FFFFFF", width=3)),
                 pull=[0.02 if v.lower() == "valid" else 0 for v in validity["Validity"]],

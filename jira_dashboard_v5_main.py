@@ -11,7 +11,7 @@ import streamlit as st
 
 # -- Default path config (edit these if the file moves) -----------------------
 DEFAULT_FOLDER = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE = "JIRA_Report_Resolution_2026_resdate.xlsx"
+DEFAULT_FILE = "JIRA_P2E_2026.xlsx"
 
 # -- Page config --------------------------------------------------------------
 st.set_page_config(
@@ -239,31 +239,6 @@ st.markdown(
     background: linear-gradient(90deg, var(--border), transparent);
   }}
 
-  /* SLIM STAT STRIP — replaces the old duplicate hero */
-  .stat-strip {{
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 12px;
-    padding: 12px 18px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: var(--shadow);
-    margin: 0 0 20px 0;
-    font-size: 0.86rem;
-    color: var(--subtext);
-  }}
-  .stat-strip-item b {{
-    font-family: 'IBM Plex Mono', monospace;
-    color: var(--ink);
-    font-weight: 700;
-  }}
-  .stat-strip-sep {{
-    color: var(--border);
-    font-weight: 700;
-  }}
-
   /* KPI METRIC CARDS — colored stripe on the left, lifts on hover */
   [data-testid="metric-container"] {{
     background: var(--surface);
@@ -327,27 +302,37 @@ st.markdown(
     box-shadow: var(--shadow);
   }}
 
-  /* TABS — accent underline */
+  /* TABS — brick-style buttons with breathing room above the KPI strip */
   [data-testid="stTabs"] {{
+    margin-top: 32px !important;
     border-bottom: 1px solid var(--border);
+  }}
+  [data-testid="stTabs"] [role="tablist"] {{
+    gap: 8px;
   }}
   [data-testid="stTabs"] button {{
     font-family: 'Inter', sans-serif;
-    font-size: 0.88rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    color: var(--muted);
-    background: transparent;
-    padding: 12px 6px;
-    transition: color 0.15s ease;
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.005em;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 18px !important;
+    transition: all 0.15s ease;
   }}
   [data-testid="stTabs"] button:hover {{
-    color: var(--ink);
+    background: rgba(124, 111, 232, 0.08);
+    border-color: var(--accent);
   }}
   [data-testid="stTabs"] button[aria-selected="true"] {{
-    color: var(--ink);
-    border-bottom: 2px solid var(--accent) !important;
-    font-weight: 700;
+    background: var(--ink);
+    color: #FFFFFF !important;
+    border-color: var(--ink);
+  }}
+  [data-testid="stTabs"] button[aria-selected="true"] p {{
+    color: #FFFFFF !important;
   }}
 
   .stAlert {{ border-radius: 12px; }}
@@ -676,6 +661,50 @@ def load_issue_data(source) -> pd.DataFrame:
     return _parse_issue_source(source)
 
 
+# ─── JIRA_Created loader ────────────────────────────────────────────────────
+# This sheet is a separate dataset from the quarter sheets (Q1_2026, Q2_2026).
+# It contains every Jira CREATED in each quarter (not just resolved ones), with
+# a Customer column. Used by the Snapshot tab to show top customers by Jira
+# count. Schema is intentionally different from the quarter sheets:
+#   Quarter, Summary, Issue Key, Customer, Support Ticket, Creation Date, Affects Version
+def _parse_jira_created(source) -> pd.DataFrame:
+    """Read the optional 'JIRA_Created' sheet. Returns an empty DataFrame if
+    the file or sheet is absent — the dashboard degrades gracefully when this
+    dataset isn't available."""
+    rewind_source(source)
+    name = source if isinstance(source, str) else getattr(source, "name", "")
+    if not str(name).lower().endswith((".xlsx", ".xls")):
+        return pd.DataFrame()
+    try:
+        xls = pd.ExcelFile(source, engine="openpyxl")
+        if "JIRA_Created" not in xls.sheet_names:
+            return pd.DataFrame()
+        rewind_source(source)
+        df = pd.read_excel(source, sheet_name="JIRA_Created", engine="openpyxl")
+    except Exception:
+        return pd.DataFrame()
+    df.columns = df.columns.str.strip()
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _parse_jira_created_from_path(path: str, mtime: float) -> pd.DataFrame:
+    """Cached entry for string paths."""
+    return _parse_jira_created(path)
+
+
+def load_jira_created(source) -> pd.DataFrame:
+    """Public entry point for the JIRA_Created sheet. Same caching pattern
+    as load_issue_data."""
+    if isinstance(source, str):
+        try:
+            mtime = os.path.getmtime(source)
+            return _parse_jira_created_from_path(source, mtime)
+        except Exception:
+            pass
+    return _parse_jira_created(source)
+
+
 def build_reporting_period_options(frame: pd.DataFrame):
     """Build the period dropdown options directly from the sheets present in
     the file. Adds H1/H2 groupings per fiscal year automatically when the
@@ -931,6 +960,11 @@ if data_file is None:
 
 try:
     df_source = load_issue_data(data_file)
+    # Companion dataset: every Jira CREATED in each quarter (not just resolved).
+    # Has a Customer column we use for the "Top customers" chart on Snapshot.
+    # Loads independently of the main quarter sheets — failure to find this
+    # sheet is non-fatal because we degrade gracefully.
+    df_jira_created = load_jira_created(data_file)
 except PermissionError as exc:
     st.markdown('<div class="hero">', unsafe_allow_html=True)
     st.markdown('<div class="hero-title">File is locked</div>', unsafe_allow_html=True)
@@ -1148,18 +1182,6 @@ if sel_types and "Type of Request" in df.columns:
 if sel_validity and "Validity" in df.columns:
     df = df[df["Validity"].isin(sel_validity)]
 
-# -- Live stats strip (slim, after filters) ----------------------------------
-st.markdown(
-    f'<div class="stat-strip">'
-    f'<span class="stat-strip-item"><b>{len(df):,}</b> of <b>{len(df_period):,}</b> issues</span>'
-    f'<span class="stat-strip-sep">·</span>'
-    f'<span class="stat-strip-item">period <b>{reporting_period}</b></span>'
-    f'<span class="stat-strip-sep">·</span>'
-    f'<span class="stat-strip-item">updated {datetime.now().strftime("%d %b %Y %H:%M")}</span>'
-    f'</div>',
-    unsafe_allow_html=True,
-)
-
 def build_volume_summary(frame: pd.DataFrame, date_col: str) -> pd.DataFrame | None:
     if date_col not in frame.columns:
         return None
@@ -1184,18 +1206,14 @@ def safe_pct(num, den):
 
 total_issues = len(df)
 p1_count = int((df["Priority_Short"] == "P1").sum()) if "Priority_Short" in df.columns else 0
-# "Resolved" KPI: match status values that mean "the issue is closed out".
-# Uses a whole-word regex (\b) so "Not Resolved" and "Unresolved" do NOT
-# get counted. Also explicitly excludes any status starting with "Not " or
-# containing "unresolved" as a final safety net.
-_status_series = df["Status"].astype(str) if "Status" in df.columns else pd.Series([], dtype=str)
-_resolved_mask = _status_series.str.contains(r"\b(?:resolved|closed|done)\b", case=False, regex=True, na=False)
-_neg_mask = _status_series.str.contains(r"\b(?:not\s+resolved|unresolved|reopened|in\s+progress|open)\b", case=False, regex=True, na=False)
-resolved_count = int((_resolved_mask & ~_neg_mask).sum()) if "Status" in df.columns else 0
 valid_count = int((df["Validity"].astype(str).str.strip().str.lower() == "valid").sum()) if "Validity" in df.columns else 0
 # Bug count comes from the Type of Request column ("Bug" / "Request for Help"),
 # NOT from the RFH/Bug classification correctness column.
 bug_count = int(df["Type of Request"].astype(str).str.strip().str.lower().eq("bug").sum()) if "Type of Request" in df.columns else 0
+# RFH count uses the same Type of Request column. Match canonical "Request for Help"
+# (already normalized at load_issue_data), with a forgiving lowercase strip just
+# in case a future export reintroduces a variant.
+rfh_count = int(df["Type of Request"].astype(str).str.strip().str.lower().eq("request for help").sum()) if "Type of Request" in df.columns else 0
 
 # Render KPIs as st.metric (no delta) + a plain markdown caption underneath.
 # Why not use st.metric's delta param? Streamlit auto-injects a green/red
@@ -1208,6 +1226,10 @@ def kpi_caption(pct: float) -> str:
         f'{pct:.0f}% of total</div>'
     )
 
+# 5-tile KPI strip — Total → P1 critical → Valid → Bugs → RFH.
+# We deliberately don't show a "Resolved" tile because the underlying source
+# data is already filtered to resolved Jiras only. Showing 100% Resolved would
+# be redundant and risk implying these are open-vs-closed counts.
 kpi_cols = st.columns(5)
 with kpi_cols[0]:
     st.metric("Total issues", f"{total_issues:,}")
@@ -1215,14 +1237,14 @@ with kpi_cols[1]:
     st.metric("P1 critical", f"{p1_count:,}")
     st.markdown(kpi_caption(safe_pct(p1_count, total_issues)), unsafe_allow_html=True)
 with kpi_cols[2]:
-    st.metric("Resolved", f"{resolved_count:,}")
-    st.markdown(kpi_caption(safe_pct(resolved_count, total_issues)), unsafe_allow_html=True)
-with kpi_cols[3]:
     st.metric("Valid", f"{valid_count:,}")
     st.markdown(kpi_caption(safe_pct(valid_count, total_issues)), unsafe_allow_html=True)
-with kpi_cols[4]:
+with kpi_cols[3]:
     st.metric("Bugs", f"{bug_count:,}")
     st.markdown(kpi_caption(safe_pct(bug_count, total_issues)), unsafe_allow_html=True)
+with kpi_cols[4]:
+    st.metric("RFH", f"{rfh_count:,}")
+    st.markdown(kpi_caption(safe_pct(rfh_count, total_issues)), unsafe_allow_html=True)
 
 # -- Tabs ---------------------------------------------------------------------
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Snapshot", "Quality", "Team", "Data explorer", "How we calculate"])
@@ -1591,6 +1613,80 @@ with tab1:
             chart_theme(fig)
             st.plotly_chart(fig, use_container_width=True, key="chart_06_volume")
 
+    # ─── Top customers (new section, full-width row) ─────────────────────
+    # Uses the JIRA_Created sheet (separate dataset from the quarter sheets).
+    # That sheet contains every Jira created in the period along with which
+    # Customer raised it. Question this answers: "Which customers are raising
+    # the most P2E Jiras?" — useful for account prioritization conversations.
+    if df_jira_created is not None and not df_jira_created.empty and "Customer" in df_jira_created.columns:
+        section("Top customers by JIRA volume")
+
+        # Apply the same period filter to the customer dataset so the chart
+        # matches the rest of the page. JIRA_Created has a Quarter column
+        # (Q1_2026 / Q2_2026 / etc.) that's structurally identical to the
+        # Source Sheet column on the issue dataset — we map it to the same
+        # display label and reuse apply_reporting_period.
+        df_jc = df_jira_created.copy()
+        if "Quarter" in df_jc.columns:
+            df_jc["Source Sheet"] = df_jc["Quarter"].astype(str).str.strip()
+            df_jc["Quarter Label"] = df_jc["Source Sheet"].map(sheet_to_quarter_label)
+
+        try:
+            df_jc_period = apply_reporting_period(df_jc, reporting_period, period_map)
+        except Exception:
+            # If for any reason the period filter doesn't match the JIRA_Created
+            # dataset, fall back to showing all of it rather than crashing.
+            df_jc_period = df_jc
+
+        if df_jc_period.empty:
+            st.caption("No customer data available for the selected period.")
+        else:
+            # Top 12 customers by Jira count
+            customer_counts = (
+                df_jc_period["Customer"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .value_counts()
+                .head(12)
+                .reset_index()
+            )
+            customer_counts.columns = ["Customer", "Count"]
+
+            # Horizontal bar chart in the indigo gradient — matches the
+            # Engineer chart on the Team tab so they read as siblings.
+            fig = go.Figure()
+            counts_list = customer_counts["Count"].tolist()
+            colors = bar_palette(counts_list, CHART_PLUM, CHART_PLUM_DEEP)
+
+            fig.add_trace(go.Bar(
+                x=counts_list,
+                y=customer_counts["Customer"].tolist(),
+                orientation="h",
+                marker=dict(color=colors, line=dict(width=0)),
+                text=[f"<b>{v}</b>" for v in counts_list],
+                textposition="outside",
+                textfont=dict(color=INK, size=12, family="Inter"),
+                hovertemplate="<b>%{y}</b><br>%{x} jiras created<extra></extra>",
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="",
+                yaxis_title="",
+                height=420,
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="chart_07_top_customers")
+
+            st.caption(
+                f"Showing top {len(customer_counts)} customers · "
+                f"{int(df_jc_period['Customer'].notna().sum()):,} total Jiras created in this period · "
+                f"data from the JIRA_Created sheet (separate from the resolved-issues view above)."
+            )
+
 # -- TAB 2: Quality -----------------------------------------------------------
 with tab2:
     col1, col2 = st.columns(2)
@@ -1779,37 +1875,6 @@ with tab3:
             chart_theme(fig)
             st.plotly_chart(fig, use_container_width=True, key="chart_14")
 
-    section("Export root cause rows")
-    if "Root Cause Resolution" in df.columns:
-        id_col = detect_id_column(df)
-        root_values = sorted(df["Root Cause Resolution"].dropna().astype(str).unique().tolist())
-        chosen_root = st.selectbox(
-            "Choose a root cause value to export",
-            ["(all)"] + root_values,
-            key="root_cause_export_choice",
-        )
-        root_export = df.copy()
-        if chosen_root != "(all)":
-            root_export = root_export[root_export["Root Cause Resolution"].astype(str) == chosen_root]
-
-        st.caption(f"{len(root_export):,} matching rows")
-        export_cols = []
-        if id_col:
-            export_cols.append(id_col)
-        for col in ["Root Cause Resolution", "Summary", "Status", "Reporter", "Affected Version", "Affect Version", "Question Answered"]:
-            if col in root_export.columns and col not in export_cols:
-                export_cols.append(col)
-        if not export_cols:
-            export_cols = list(root_export.columns)
-
-        st.download_button(
-            "⬇ Download Excel",
-            make_xlsx_bytes(root_export[export_cols].drop_duplicates(), sheet_name="Root_Cause"),
-            file_name="root_cause_rows.xlsx",
-            mime=XLSX_MIME,
-            key="dl_root_cause_xlsx",
-        )
-
     if "Creator" in df.columns:
         section("Issues created by")
 
@@ -1824,18 +1889,40 @@ with tab3:
         if not split_options:
             split_options = ["Total only"]
 
-        # Small toggle above the chart — minimal radio so leadership can flip
-        # views during the meeting without touching anything else.
-        split_container = st.container(key="creator_split_picker")
-        with split_container:
-            split_mode = st.radio(
-                "Split by",
-                split_options,
-                index=0,
-                horizontal=True,
-                key="creator_split_mode",
-                label_visibility="collapsed",
+        # ─── Advanced analysis gate ─────────────────────────────────
+        # Leadership asked us to keep the default view simple — just total
+        # issue count per creator. The deeper Validity / RFH-Bug breakdown
+        # is still available behind an "Advanced analysis" checkbox so it's
+        # one click away when needed but doesn't dominate the screen.
+        # When the checkbox is OFF, the split toggle is hidden and the chart
+        # falls back to the simplest mode ("Total only" if nothing else fits,
+        # otherwise the first available split mode is irrelevant because the
+        # branch below uses split_mode = "Total only" anyway).
+        adv_container = st.container(key="creator_adv_toggle")
+        with adv_container:
+            show_advanced = st.checkbox(
+                "Advanced analysis",
+                value=False,
+                key="creator_show_advanced",
+                help="Reveals a deeper breakdown of issues by Validity (Valid/Invalid) or by Type of Request (RFH/Bug).",
             )
+
+        if show_advanced and split_options != ["Total only"]:
+            # Small toggle above the chart — minimal radio so leadership can flip
+            # views during the meeting without touching anything else.
+            split_container = st.container(key="creator_split_picker")
+            with split_container:
+                split_mode = st.radio(
+                    "Split by",
+                    split_options,
+                    index=0,
+                    horizontal=True,
+                    key="creator_split_mode",
+                    label_visibility="collapsed",
+                )
+        else:
+            # Default view — no split, just total count per creator.
+            split_mode = "Total only"
 
         # Top 12 creators by total volume
         top_creators = df["Creator"].value_counts().head(12).index.tolist()
@@ -2000,6 +2087,35 @@ st.markdown(
   .st-key-creator_split_picker [role="radiogroup"] label > div:first-child {{
     display: none !important;
   }}
+
+  /* Advanced analysis checkbox — sits above the split toggle, matches the
+     Aurora visual language. Compact, indigo-accented, low chrome. */
+  .st-key-creator_adv_toggle {{
+    margin: 4px 0 6px 0;
+  }}
+  .st-key-creator_adv_toggle label {{
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    color: {SUBTEXT} !important;
+    cursor: pointer !important;
+  }}
+  .st-key-creator_adv_toggle label p,
+  .st-key-creator_adv_toggle label span,
+  .st-key-creator_adv_toggle label div {{
+    color: {SUBTEXT} !important;
+    font-weight: 600 !important;
+  }}
+  .st-key-creator_adv_toggle label:hover,
+  .st-key-creator_adv_toggle label:hover p,
+  .st-key-creator_adv_toggle label:hover span {{
+    color: {INK} !important;
+  }}
+  /* Indigo tint for the checkbox box itself when checked */
+  .st-key-creator_adv_toggle [data-baseweb="checkbox"] [data-checked="true"] {{
+    background-color: {CHART_INDIGO_DEEP} !important;
+    border-color: {CHART_INDIGO_DEEP} !important;
+  }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -2113,55 +2229,32 @@ st.markdown(
 
 # -- TAB 4: Data explorer -----------------------------------------------------
 with tab4:
-    # ─── Section 1: Filtered issues table ────────────────────────────────────
-    # Shows exactly what the dashboard is currently filtered to via the
-    # period dropdown + sidebar filters. No additional filtering happens here —
-    # the table is a faithful view of the data driving the rest of the page.
+    # Single tool — Custom export builder. (Filtered issues table was removed
+    # in v9.2 because leadership wanted a single, focused export tool.)
+    # Above the builder, a small "How to use" card explains the workflow so
+    # first-time viewers know what they're looking at.
 
     st.markdown(
-        f'<div class="explorer-section-header">'
-        f'<span class="explorer-card-dot" style="background:{CHART_INDIGO};"></span>'
-        f'<span class="explorer-card-title">Filtered issues table</span>'
-        f'<span class="explorer-card-subtitle">View what the dashboard is currently filtered to</span>'
+        f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:12px;'
+        f'padding:18px 22px;margin:4px 0 24px 0;box-shadow:{SHADOW};">'
+        f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
+        f'letter-spacing:0.16em;text-transform:uppercase;color:{CHART_INDIGO_DEEP};margin-bottom:10px;">'
+        f'How to use the export builder'
+        f'</div>'
+        f'<div style="font-family:Inter,sans-serif;font-size:0.9rem;color:{INK};line-height:1.65;">'
+        f'<b>1.</b> Click <b>+ Add condition</b> to add a filter row. Choose a column, an operator (equals, contains, etc.), and a value. '
+        f'Repeat for as many conditions as you need.<br>'
+        f'<b>2.</b> Use the <b>Match</b> toggle to control how conditions combine — '
+        f'<b style="color:{CHART_INDIGO_DEEP};">All conditions (AND)</b> requires every condition to match a row, '
+        f'<b style="color:{CHART_TERRACOTTA_DEEP};">Any condition (OR)</b> matches rows that satisfy at least one.<br>'
+        f'<b>3.</b> Pick which columns appear in the export from the column selector below the conditions.<br>'
+        f'<b>4.</b> Click <b>Download Excel</b> to save your custom slice as a spreadsheet.'
+        f'</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        f'<div style="font-family:Inter,sans-serif;font-size:0.88rem;color:{SUBTEXT};line-height:1.55;margin:0 0 14px 0;">'
-        f'Showing all <b style="color:{INK}">{len(df):,}</b> issues matching the current period and sidebar filters. '
-        f'Use the search box below to narrow further by summary text.'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    table_search = st.text_input(
-        "Search by summary text",
-        placeholder="Type any keyword from the summary…",
-        key="table_search",
-    )
-    table_df = df.copy()
-    if table_search and "Summary" in table_df.columns:
-        table_df = table_df[
-            table_df["Summary"].astype(str).str.contains(table_search, case=False, na=False)
-        ]
-
-    table_show_cols = [c for c in table_df.columns if c not in ["Priority_Short", "Resolution Month", "Quarter Label", "Source Sheet"]]
-    st.dataframe(table_df[table_show_cols], use_container_width=True, height=420)
-    st.caption(f"{len(table_df):,} of {len(df):,} rows shown · ID column detected: `{detect_id_column(df) or 'none'}`")
-
-    st.download_button(
-        "⬇ Download Excel",
-        make_xlsx_bytes(table_df[table_show_cols], sheet_name="Filtered_Issues"),
-        file_name="filtered_issues.xlsx",
-        mime=XLSX_MIME,
-        key="dl_filtered_xlsx",
-    )
-
-    # Visual divider between the two tools
-    st.markdown('<div class="explorer-divider"></div>', unsafe_allow_html=True)
-
-    # ─── Section 2: Custom export builder ────────────────────────────────────
+    # ─── Custom export builder ────────────────────────────────────────────────
     # Natural-language-style filter rows. A "Match" toggle controls whether
     # multiple conditions combine with AND or OR.
 
@@ -2214,6 +2307,11 @@ with tab4:
         "Priority",
         # Internal helpers users shouldn't see
         "Resolution Month", "Quarter Label", "Source Sheet",
+        # WIP — the AI-generated root cause column is currently work-in-progress.
+        # We're keeping it out of the dashboard UI until the team validates the
+        # output quality. The column still loads from the source file so it's
+        # available for analysis behind the scenes.
+        "Root Cause Resolution AI",
     }
     available_cols = [c for c in PRIORITY_COLUMNS_HINT if c in df.columns]
     other_cols = [c for c in df.columns if c not in available_cols and c not in HIDDEN_COLUMNS]
@@ -2500,23 +2598,31 @@ with tab4:
 
 # -- TAB 5: How we calculate --------------------------------------------------
 with tab5:
-    # Section 5 is documentation, not visualization. Each chart on the dashboard
-    # gets a card explaining its source columns, the math, and a worked example
-    # using current data so numbers feel familiar to leadership.
+    # Documentation tab. Reorganized in v9.2 from a flat list of expanders
+    # into a card-per-tab layout. Each card contains a row of "brick"
+    # buttons (one per chart/KPI). Clicking a brick reveals its
+    # documentation inline within that same card while the other bricks
+    # stay visible — so the reader can browse without losing context.
+    #
+    # State model: one session_state key per card ("calc_active_<group>").
+    # Holds either None (nothing selected) or the slug of the selected
+    # brick. Buttons rerun the page on click; we render the body inline
+    # below the brick row when state is non-None.
 
     st.markdown(
         f'<div style="font-family:Inter,sans-serif;font-size:0.95rem;line-height:1.65;'
         f'color:{SUBTEXT};max-width:780px;margin:8px 0 26px 0;">'
         f'A reference for how each chart and KPI on this dashboard is computed. '
         f'Every number you see is derived directly from the columns in the source '
-        f'spreadsheet — no hidden adjustments, no smoothing. Click any card to expand it.'
+        f'spreadsheet — no hidden adjustments, no smoothing. Click any brick to read its details.'
         f'</div>',
         unsafe_allow_html=True,
     )
 
-    # Helper: build a styled card body. Uses small caps section labels with
-    # dark text in a clean two-column-ish inline layout.
-    def _calc_card(what: str, source: str, how: str, example: str, edge: str = ""):
+    # Helper: render the body of a calc card. Same layout as before — labelled
+    # sections (What it shows / Source / How / Worked example / Edge cases)
+    # but rendered inline rather than inside an expander.
+    def _calc_body(what: str, source: str, how: str, example: str, edge: str = ""):
         parts = [
             ("What it shows", what),
             ("Source columns", source),
@@ -2526,10 +2632,13 @@ with tab5:
         if edge:
             parts.append(("Edge cases", edge))
 
-        html = ""
+        html = (
+            f'<div style="background:rgba(124,111,232,0.04);border:1px solid {BORDER};'
+            f'border-radius:10px;padding:18px 22px;margin:14px 0 4px 0;">'
+        )
         for label, body in parts:
             html += (
-                f'<div style="margin:14px 0 0 0;">'
+                f'<div style="margin:10px 0 0 0;">'
                 f'<div style="font-family:Inter,sans-serif;font-size:0.7rem;font-weight:700;'
                 f'letter-spacing:0.16em;text-transform:uppercase;color:{MUTED};margin-bottom:6px;">'
                 f'{label}</div>'
@@ -2537,248 +2646,255 @@ with tab5:
                 f'color:{INK};">{body}</div>'
                 f'</div>'
             )
+        html += '</div>'
         st.markdown(html, unsafe_allow_html=True)
 
-    # --- KPI Strip ----------------------------------------------------------
-    st.markdown(
-        f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
-        f'letter-spacing:0.16em;text-transform:uppercase;color:{INK};margin:24px 0 12px 0;">'
-        f'KPI strip · top of every page</div>',
-        unsafe_allow_html=True,
+    # Helper: render one card. `group_key` namespaces session_state.
+    # `bricks` is a list of (slug, label, body_dict) where body_dict is the
+    # dict of args passed to _calc_body.
+    def _calc_card(card_title: str, group_key: str, bricks: list):
+        state_key = f"calc_active_{group_key}"
+        if state_key not in st.session_state:
+            st.session_state[state_key] = None
+
+        # Card outer container — parchment-on-white surface
+        st.markdown(
+            f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
+            f'letter-spacing:0.16em;text-transform:uppercase;color:{INK};margin:24px 0 10px 0;">'
+            f'{card_title}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Use a Streamlit container with a key so we can scope the brick CSS
+        with st.container(key=f"calc_card_{group_key}"):
+            # Render bricks as a row of buttons. We chunk them into rows of 3
+            # for desktop readability — Streamlit's st.columns handles the wrap.
+            chunk_size = 3
+            for i in range(0, len(bricks), chunk_size):
+                row = bricks[i:i + chunk_size]
+                cols = st.columns(chunk_size)
+                for j, (slug, label, _) in enumerate(row):
+                    with cols[j]:
+                        is_active = st.session_state[state_key] == slug
+                        # Use button type="primary" to mark active brick;
+                        # secondary for inactive. Aurora CSS below restyles both.
+                        clicked = st.button(
+                            label,
+                            key=f"brickbtn_{group_key}_{slug}",
+                            use_container_width=True,
+                            type="primary" if is_active else "secondary",
+                        )
+                        if clicked:
+                            # Toggle: clicking active brick collapses it
+                            st.session_state[state_key] = None if is_active else slug
+                            st.rerun()
+
+            # Render the body of the active brick inline below the row
+            active = st.session_state[state_key]
+            if active is not None:
+                # Find the matching brick body
+                for slug, _label, body in bricks:
+                    if slug == active:
+                        _calc_body(**body)
+                        break
+
+    # ─── Card 1: KPI strip ───────────────────────────────────────────────
+    _calc_card(
+        "KPI strip · top of every page",
+        "kpi",
+        [
+            ("total", "Total issues", dict(
+                what="The total number of issues in the current view (after period and sidebar filters).",
+                source="Every row in the loaded quarter sheets (e.g. <code>Q1_2026</code>, <code>Q2_2026</code>).",
+                how="A simple row count: <code>len(filtered_dataframe)</code>.",
+                example="If the period is set to <b>Q2 2026</b> and no sidebar filters are applied, this counts all 162 rows in the Q2_2026 sheet.",
+            )),
+            ("p1", "P1 critical", dict(
+                what="Number of issues whose priority is P1, the highest tier (mission-critical).",
+                source="<code>Priority</code> column. Long descriptions like 'P1 - Relationship is at risk…' are normalized to short codes (P1, P2, P3, P4) inside the dashboard.",
+                how="Counts rows where <code>Priority_Short == 'P1'</code>. The percentage shown is <code>P1_count ÷ total_issues × 100</code>.",
+                example="If 60 of 162 Q2 issues are tagged P1, this card shows <b>60</b> with caption <b>37% of total</b>.",
+            )),
+            ("valid", "Valid", dict(
+                what="Number of issues marked as a legitimate concern after triage.",
+                source="<code>Validity</code> column.",
+                how="Counts rows where Validity (trimmed and case-insensitive) equals <code>'valid'</code>. "
+                    "Percentage is <code>valid_count ÷ total_issues × 100</code>.",
+                example="In Q2 2026, 139 of 162 issues are tagged Valid → <b>139</b> with caption <b>86% of total</b>.",
+                edge="Rows where Validity is blank, NaN, or any value other than 'Valid' or 'Invalid' are not counted.",
+            )),
+            ("bugs", "Bugs", dict(
+                what="Number of issues classified as a Bug rather than a Request for Help.",
+                source="<code>Type of Request</code> column.",
+                how="Counts rows where <code>Type of Request</code> (trimmed and case-insensitive) equals <code>'bug'</code>. "
+                    "Note: this uses Type of Request directly, NOT the 'Correct / Incorrect classification? RFH/Bug' "
+                    "column (which only contains 'Correct' or 'Incorrect' and tells you whether the categorization was right).",
+                example="In Q2 2026, 50 of 162 issues are tagged Bug → <b>50</b> with caption <b>31% of total</b>.",
+            )),
+            ("rfh", "RFH", dict(
+                what="Number of issues classified as a Request for Help (i.e., not a Bug).",
+                source="<code>Type of Request</code> column.",
+                how="Counts rows where <code>Type of Request</code> (trimmed and case-insensitive) equals <code>'request for help'</code>. "
+                    "Together with the Bugs KPI, these two categories cover the full population of typed issues.",
+                example="In Q2 2026, 112 of 162 issues are tagged Request for Help → <b>112</b> with caption <b>69% of total</b>.",
+            )),
+        ],
     )
 
-    with st.expander("Total issues", expanded=False):
-        _calc_card(
-            what="The total number of issues in the current view (after period and sidebar filters).",
-            source="Every row in the loaded quarter sheets (e.g. <code>Q1_2026</code>, <code>Q2_2026</code>).",
-            how="A simple row count: <code>len(filtered_dataframe)</code>.",
-            example="If the period is set to <b>Q2 2026</b> and no sidebar filters are applied, this counts all 302 rows in the Q2_2026 sheet.",
-        )
-
-    with st.expander("P1 critical", expanded=False):
-        _calc_card(
-            what="Number of issues whose priority is P1, the highest tier (mission-critical).",
-            source="<code>Priority</code> column. Long descriptions like 'P1 - Relationship is at risk…' are normalized to short codes (P1, P2, P3, P4) inside the dashboard.",
-            how="Counts rows where <code>Priority_Short == 'P1'</code>. The percentage shown is <code>P1_count ÷ total_issues × 100</code>.",
-            example="If 89 of 302 Q2 issues are tagged P1, this card shows <b>89</b> with caption <b>29% of total</b>.",
-        )
-
-    with st.expander("Resolved", expanded=False):
-        _calc_card(
-            what="Number of issues whose status indicates they are no longer open.",
-            source="<code>Status</code> column.",
-            how="Counts rows where the Status text contains any of: <i>Resolved</i>, <i>Closed</i>, or <i>Done</i> (case-insensitive). "
-                "Because the source spreadsheet is pre-filtered to issues resolved in the chosen quarter, this number is "
-                "typically equal to the total issue count — i.e., 100% of total.",
-            example="In Q2 2026, all 302 issues meet the resolution criteria, so this shows <b>302</b> with caption <b>100% of total</b>.",
-        )
-
-    with st.expander("Valid", expanded=False):
-        _calc_card(
-            what="Number of issues marked as a legitimate concern after triage.",
-            source="<code>Validity</code> column.",
-            how="Counts rows where Validity (trimmed and case-insensitive) equals <code>'valid'</code>. "
-                "Percentage is <code>valid_count ÷ total_issues × 100</code>.",
-            example="In Q2 2026, 265 of 302 issues are tagged Valid → <b>265</b> with caption <b>88% of total</b>.",
-            edge="Rows where Validity is blank, NaN, or any value other than 'Valid' or 'Invalid' are not counted.",
-        )
-
-    with st.expander("Bugs", expanded=False):
-        _calc_card(
-            what="Number of issues classified as a Bug rather than a Request for Help.",
-            source="<code>Type of Request</code> column.",
-            how="Counts rows where <code>Type of Request</code> (trimmed and case-insensitive) equals <code>'bug'</code>. "
-                "Note: this uses Type of Request directly, NOT the 'Correct / Incorrect classification? RFH/Bug' "
-                "column (which only contains 'Correct' or 'Incorrect' and tells you whether the categorization was right).",
-            example="In Q2 2026, 97 of 302 issues are tagged Bug → <b>97</b> with caption <b>32% of total</b>.",
-        )
-
-    # --- Snapshot tab -------------------------------------------------------
-    st.markdown(
-        f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
-        f'letter-spacing:0.16em;text-transform:uppercase;color:{INK};margin:32px 0 12px 0;">'
-        f'Snapshot tab</div>',
-        unsafe_allow_html=True,
+    # ─── Card 2: Snapshot ───────────────────────────────────────────────
+    _calc_card(
+        "Snapshot tab",
+        "snapshot",
+        [
+            ("validity", "Validity distribution (donut)", dict(
+                what="Two-slice donut showing the share of Valid vs Invalid issues.",
+                source="<code>Validity</code> column.",
+                how="Counts each Validity value, then renders as a donut. The percentage shown on each slice is rounded to whole numbers (e.g. 88% rather than 87.7%).",
+                example="265 Valid + 37 Invalid → 88% Valid slice (emerald) and 12% Invalid slice (terracotta).",
+                edge="Validity values other than 'Valid' or 'Invalid' (blanks, NaN) are excluded from the donut.",
+            )),
+            ("type", "Type of request (stacked bar)", dict(
+                what="Total issues per request type (Bug, Request for Help), with each bar split into Valid + Invalid segments.",
+                source="<code>Type of Request</code> and <code>Validity</code> columns.",
+                how="Cross-tabulates Type × Validity, then plots a stacked bar with Type on the x-axis. Stack order: Valid first (bottom), then Invalid (top). The y-axis is total count of issues for that type.",
+                example="Bug: 60 Valid + 37 Invalid → emerald 60 stacked under terracotta 37 = total bar height 97.",
+                edge="Rows with blank Type of Request are excluded.",
+            )),
+            ("version", "Version distribution (bar chart)", dict(
+                what="Top affected versions ordered by issue count.",
+                source="<code>Affects Version</code> column.",
+                how="Counts how many issues mention each version, then keeps the top 8 by count. Numeric versioning is sorted naturally (so 8.6.4 > 8.6.10 lexically would be wrong — we sort by count instead).",
+                example="If 8.6.4 has 76 issues, 8.9.2 has 38, and so on, the chart shows them ordered by count.",
+                edge="A row can list multiple versions in one cell separated by commas — each one is counted independently.",
+            )),
+            ("rootcause", "Root cause resolution breakdown (bar chart)", dict(
+                what="Distribution of root cause categories across all issues.",
+                source="<code>Root Cause Resolution</code> column.",
+                how="Counts each unique value, sorts by frequency, displays as a horizontal bar chart for readability of long category names.",
+                example="If 'Configuration issue' appears 45 times and 'Product defect' appears 33 times, those become the top two bars.",
+                edge="Rows with blank Root Cause Resolution are excluded.",
+            )),
+            ("component", "Component distribution (lollipop chart)", dict(
+                what="Top components affected by issues, displayed as a Bloomberg-style lollipop chart for visual distinction.",
+                source="<code>Component/s</code> column.",
+                how="Splits cells with multiple components (separated by commas, semicolons, or newlines), counts each unique component, keeps the top 12.",
+                example="Workflow - Campaigns: 35 issues, Channel - Email: 29 issues, Reporting: 26 issues, etc.",
+                edge="A row listing 'A, B, C' contributes to all three components' counts. This avoids hiding components that travel together.",
+            )),
+            ("volume", "Volume trend (line chart)", dict(
+                what="Issue creation volume over time, by month.",
+                source="<code>Resolution Date</code> column.",
+                how="Groups issues by month of resolution, counts per month, plots as a line chart with steel-blue area fill below.",
+                example="Dec 2025: 25 issues, Jan 2026: 32 issues, Feb 2026: 28 issues — three points on the line.",
+                edge="Rows with missing Resolution Date are excluded.",
+            )),
+            ("customers", "Top customers by JIRA volume (bar chart)", dict(
+                what="Top 12 customers ranked by how many P2E Jiras they raised in the selected period.",
+                source="<code>JIRA_Created</code> sheet (a separate dataset from the quarter sheets). Uses the <code>Customer</code> column.",
+                how="Counts Jiras per Customer, sorts descending, keeps the top 12. The chart respects the same reporting period as the rest of the dashboard — selecting Q2 2026 shows top customers for Q2 only.",
+                example="In Q2 2026: MICROSOFT - MSCOM (9), H&amp;M (8), MASHREQ BANK (7), KASIKORNBANK PUBLIC COMPANY (6).",
+                edge="Customer entries are taken as-is from the source — different casings or formats (e.g. 'Microsoft - MSCOM' vs 'MICROSOFT - MSCOM') count as distinct customers because that's how the data team labels them upstream.",
+            )),
+        ],
     )
 
-    with st.expander("Validity distribution (donut)", expanded=False):
-        _calc_card(
-            what="Share of issues classified as Valid vs Invalid, with a callout above showing the percentage and counts.",
-            source="<code>Validity</code> column.",
-            how="Groups rows by their Validity value and counts each group. The two donut segments represent these counts. "
-                "The percentage in the callout is <code>valid_count ÷ total × 100</code>.",
-            example="Q2 2026 has 265 Valid + 37 Invalid = 302 total → callout reads <b>87.7% valid · 265 valid · 37 invalid · 302 total</b>.",
-            edge="Blank Validity values would show as a <code>(blank)</code> segment, but in your data this column is always populated.",
-        )
-
-    with st.expander("Type of request (stacked bar with Valid/Invalid breakdown)", expanded=False):
-        _calc_card(
-            what="Total issues per request type (Bug, Request for Help), with each bar split into Valid + Invalid segments.",
-            source="<code>Type of Request</code> and <code>Validity</code> columns.",
-            how="Cross-tabulates the two columns: for each Type, counts how many were Valid and how many were Invalid. "
-                "Stacks the two counts into a single horizontal bar. The grand total appears outside each bar.",
-            example="Q2 2026 'Bug' = 97 issues, all 97 Valid → bar is fully emerald, total <b>97</b>. "
-                    "'Request for Help' = 205 issues = 168 Valid + 37 Invalid → bar shows emerald (168) + terracotta (37), total <b>205</b>.",
-            edge="If any rows have blank Validity, they would appear as a gray <code>(blank)</code> segment.",
-        )
-
-    with st.expander("Version distribution (bar chart)", expanded=False):
-        _calc_card(
-            what="The 15 most-affected product versions, ranked by number of issues.",
-            source="<code>Affects Version</code> column. (NOT <code>Fixed Version</code> — that's a different field.)",
-            how="Splits cells on commas/semicolons (since one issue can affect multiple versions), explodes them into individual rows, "
-                "counts occurrences of each version, and keeps the top 15. The largest bar is highlighted in deeper emerald.",
-            example="An issue with <code>Affects Version = '7.4.3, 8.9.2'</code> contributes <b>+1</b> to the 7.4.3 count AND <b>+1</b> to the 8.9.2 count. "
-                    "In Q2 2026, version 8.6.4 leads with 79 issues.",
-            edge="Rows with blank Affects Version (or literal 'N/A' / 'NA' strings) are counted in a <code>(blank)</code> bar so they aren't silently dropped. "
-                 "If there are blanks but they don't make the top 15, they're added back in as a 16th bar.",
-        )
-
-    with st.expander("Root cause resolution breakdown (bar chart)", expanded=False):
-        _calc_card(
-            what="How issues were ultimately resolved, ranked from most common to least.",
-            source="<code>Root Cause Resolution</code> column.",
-            how="Counts unique values in the column. The most common root cause appears at the top and is highlighted in deeper rose.",
-            example="If 95 issues have Root Cause Resolution = 'User Misunderstanding' and 60 have 'Code Defect', "
-                    "the chart ranks 'User Misunderstanding' first with a <b>95</b> bar.",
-            edge="Rows where Root Cause Resolution is blank are excluded from the chart entirely (since 'unresolved cause' is not a meaningful category).",
-        )
-
-    with st.expander("Component distribution (lollipop chart)", expanded=False):
-        _calc_card(
-            what="The 15 product components most frequently associated with issues, ranked.",
-            source="<code>Component/s</code> column.",
-            how="Splits comma-separated values (one issue can touch multiple components), explodes into rows, counts each component, "
-                "keeps the top 15. Each component is shown as a connector line + a marker dot at its count value. The top component is "
-                "highlighted in deeper indigo with a slightly larger dot.",
-            example="An issue with <code>Component/s = 'Workflows, Channel - SMS'</code> adds <b>+1</b> to both Workflows AND Channel - SMS counts.",
-            edge="Rows with blank Component/s are excluded.",
-        )
-
-    with st.expander("Volume trend (line chart)", expanded=False):
-        _calc_card(
-            what="How many issues were resolved each month within the chosen reporting period.",
-            source="<code>Resolution Date</code> column.",
-            how="Buckets rows by the month of their Resolution Date (e.g., 'Mar 2026'), counts rows per bucket, plots them as a smooth line "
-                "with markers. The peak month gets a slightly larger marker in deeper steel blue.",
-            example="If Q2 2026 has 58 issues resolved in March, 83 in April, and 21 in May, the line plots three points at those values.",
-            edge="Rows with no Resolution Date are excluded. The most recent month may appear lower than reality if data was exported mid-month.",
-        )
-
-    # --- Quality tab --------------------------------------------------------
-    st.markdown(
-        f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
-        f'letter-spacing:0.16em;text-transform:uppercase;color:{INK};margin:32px 0 12px 0;">'
-        f'Quality tab</div>',
-        unsafe_allow_html=True,
+    # ─── Card 3: Quality ────────────────────────────────────────────────
+    _calc_card(
+        "Quality tab",
+        "quality",
+        [
+            ("restime", "Resolution time trend (line chart)", dict(
+                what="Median and mean resolution time per month, in days.",
+                source="<code>Creation Date</code> and <code>Resolution Date</code> columns.",
+                how="For each issue: <code>days_to_resolve = Resolution Date - Creation Date</code>. "
+                    "Then groups by Resolution Month, computes both median and mean per month, plots two lines.",
+                example="Dec 2025: median 42 days, mean 50 days. May 2026: median 10 days, mean 14 days. "
+                    "Two trend lines descending from left to right.",
+                edge="Issues with missing Creation Date or Resolution Date are excluded. "
+                    "Negative or zero day counts (impossible by data) are clipped to 0 to avoid misleading the chart.",
+            )),
+            ("classacc", "Classification accuracy (stacked bar)", dict(
+                what="Per Type of Request (Bug, RFH), shows what fraction were classified Correctly vs Incorrectly.",
+                source="<code>Type of Request</code> and <code>Correct / Incorrect classification? RFH/Bug</code> columns.",
+                how="Cross-tabulates Type × Correct/Incorrect, then plots stacked bar. Each bar's full height is the type's total; the green segment is Correct, red is Incorrect.",
+                example="Bug: 60 Correct + 37 Incorrect = 62% accuracy. RFH: 183 Correct + 22 Incorrect = 89% accuracy.",
+                edge="Rows where the classification cell is blank or has any value other than 'Correct'/'Incorrect' are excluded from this chart.",
+            )),
+            ("scope", "Scope for deflection (bar chart)", dict(
+                what="Counts of issues categorized as deflectable (Yes), not deflectable (No), or partially (Yes/No).",
+                source="<code>Scope for Deflection</code> column.",
+                how="Direct value counts of the Scope for Deflection column, plotted as a single horizontal bar chart.",
+                example="No: 223, Yes/No: 43, Yes: 36 — three bars in descending order.",
+                edge="Blank values are excluded.",
+            )),
+        ],
     )
 
-    with st.expander("Resolution time trend (line chart)", expanded=False):
-        _calc_card(
-            what="The median (and mean) number of days from Creation Date to Resolution Date, plotted by resolution month. "
-                 "Tells you whether the team is getting faster at resolving issues over time.",
-            source="<code>Creation Date</code> and <code>Resolution Date</code> columns.",
-            how="For each issue: <code>days_to_resolve = Resolution Date − Creation Date</code> (in days). "
-                "Then groups issues by the month they were resolved, computes the median and mean of days_to_resolve within each group, "
-                "and plots both lines. Median is the solid indigo line; mean is the lighter dotted honey line.",
-            example="An issue created Jan 5 and resolved Jan 20 contributes <b>15 days</b> to the January 2026 bucket. "
-                    "If January has 92 such issues, the chart plots their median (e.g., 32 days) as the data point for Jan 2026.",
-            edge="Issues with negative day differences (Resolution Date earlier than Creation Date — likely data entry errors) are excluded. "
-                 "Issues missing either date are also excluded. Median is preferred over mean because a few outliers (e.g., issues resolved after 500+ days) "
-                 "would otherwise distort the trend.",
-        )
-
-    with st.expander("Classification accuracy (stacked bar)", expanded=False):
-        _calc_card(
-            what="For each Type of Request (Bug, Request for Help), how often the original classification was correct vs incorrect.",
-            source="<code>Type of Request</code> and <code>Correct / Incorrect classification? RFH/Bug</code> columns.",
-            how="Cross-tabulates the two columns. For each Type, counts rows where the classification check returned 'Correct' "
-                "vs 'Incorrect'. Stacks the two counts into a horizontal bar.",
-            example="If 144 issues have Type = 'Bug', and within those 89 are marked 'Correct' and 55 'Incorrect', "
-                    "the Bug bar is split: <b>89 emerald + 55 terracotta = 144 total</b>.",
-            edge="The 'Correct / Incorrect classification?' column should ALWAYS be either 'Correct' or 'Incorrect' — "
-                 "any blank or other value would render as a gray '(blank)' segment.",
-        )
-
-    with st.expander("Scope for deflection (bar chart)", expanded=False):
-        _calc_card(
-            what="Categories of issues that could potentially have been deflected (resolved without engineering intervention), "
-                 "ranked by frequency.",
-            source="<code>Scope for Deflection</code> column.",
-            how="Counts unique values in the column.",
-            example="If 35 issues are tagged 'Documentation gap' and 22 are 'User training', "
-                    "the chart shows two bars at 35 and 22.",
-            edge="Rows with blank Scope for Deflection are excluded — this chart only reflects issues that have been actively tagged.",
-        )
-
-    # --- Team tab -----------------------------------------------------------
-    st.markdown(
-        f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
-        f'letter-spacing:0.16em;text-transform:uppercase;color:{INK};margin:32px 0 12px 0;">'
-        f'Team tab</div>',
-        unsafe_allow_html=True,
+    # ─── Card 4: Team ────────────────────────────────────────────────
+    _calc_card(
+        "Team tab",
+        "team",
+        [
+            ("rdeng", "Issues per R&D engineer (bar chart)", dict(
+                what="Top 12 R&D engineers by number of assigned issues.",
+                source="<code>R&D Engineer</code> column.",
+                how="Counts how many issues each R&D engineer is assigned to, sorts descending, keeps the top 12.",
+                example="Milos Manic: 23 issues, Camilo Medina: 15, Bastien Armand: 13.",
+                edge="Rows with blank R&D Engineer are excluded.",
+            )),
+            ("primix", "Priority mix per engineer (stacked bar)", dict(
+                what="For each engineer, the breakdown of their issues by Priority (P1/P2/P3/P4).",
+                source="<code>R&D Engineer</code> and <code>Priority</code> columns.",
+                how="Cross-tabulates engineer × priority short code, plots stacked bar. Bar lengths are total issues; segments show P1 (terracotta), P2, P3, P4 in indigo gradient.",
+                example="An engineer with 23 issues = 8 P1 + 10 P2 + 4 P3 + 1 P4.",
+                edge="Engineers shown are limited to the top 12 by total assigned issues (same as the bar chart above).",
+            )),
+            ("createdby", "Issues created by — Advanced toggle", dict(
+                what="Top 12 creators by number of issues raised. By default shows total counts only. The 'Advanced analysis' checkbox above the chart reveals a Validity (Valid/Invalid) or RFH/Bug breakdown.",
+                source="<code>Creator</code> column. Optional split: <code>Validity</code> or <code>Type of Request</code>.",
+                how="Counts how many issues each Creator raised, sorts descending, keeps the top 12. With Advanced enabled, splits each creator's bar by the chosen dimension. Default mode is total only — clean, no split.",
+                example="In <b>Total only</b> (default): Creator A has 72 issues → single indigo bar. "
+                    "In <b>Valid/Invalid</b> mode: 65 Valid + 7 Invalid → stack shows 65 emerald + 7 terracotta. "
+                    "In <b>RFH/Bug</b> mode: 62 RFH + 10 Bug → stack shows 62 steel blue + 10 terracotta.",
+                edge="Rows with blank Creator are excluded. Advanced analysis is hidden by default to keep the leadership view simple.",
+            )),
+        ],
     )
 
-    with st.expander("Issues per R&D engineer (bar chart)", expanded=False):
-        _calc_card(
-            what="The top 15 R&D engineers by total issue volume.",
-            source="<code>R&D Engineer</code> column.",
-            how="Counts unique values in the column, takes the top 15. The engineer with the highest count is highlighted in deeper indigo.",
-            example="If Engineer A has 45 issues and Engineer B has 32, A is on top with a <b>45</b> bar.",
-            edge="Rows where R&D Engineer is blank or unassigned are excluded.",
-        )
-
-    with st.expander("Priority mix per engineer (stacked bar)", expanded=False):
-        _calc_card(
-            what="For the top 10 engineers, how their issue load breaks down across priority levels P1, P2, P3, P4.",
-            source="<code>R&D Engineer</code> and <code>Priority_Short</code> (derived from <code>Priority</code>).",
-            how="Cross-tabulates engineer × priority. Each engineer gets a stacked bar with one segment per priority. "
-                "Colors: P1 = terracotta-deep (most urgent), P2 = honey, P3 = steel blue, P4 = emerald.",
-            example="If Engineer A has 45 total: 12 P1 + 18 P2 + 10 P3 + 5 P4, the stack shows those four colored segments adding up to 45.",
-        )
-
-    with st.expander("Root cause export", expanded=False):
-        _calc_card(
-            what="Not a chart — a data export tool. Lets you filter all rows by their Root Cause Resolution value and download the matching subset as Excel.",
-            source="<code>Root Cause Resolution</code> column for filtering; whichever ID column is detected (NEO ID / Issue Key) plus context columns for export.",
-            how="Filters the current dataframe by the chosen Root Cause value, picks a small set of relevant columns "
-                "(ID, Summary, Status, etc.), and offers it as a downloadable Excel file.",
-            example="Choose 'Code Defect' from the dropdown → an Excel file with all rows tagged that root cause is generated.",
-        )
-
-    with st.expander("Issues created by — split toggle (stacked bar)", expanded=False):
-        _calc_card(
-            what="Top 12 creators by total volume, with each creator's bar split by either Validity (Valid/Invalid) or Type of Request (RFH/Bug). "
-                 "A small toggle above the chart switches between the two views.",
-            source="<code>Creator</code> + either <code>Validity</code> OR <code>Type of Request</code> depending on toggle.",
-            how="Picks the top 12 creators by row count. Cross-tabulates Creator × selected dimension. "
-                "Each creator's bar is a stack of the two segments. Grand total is annotated outside each bar.",
-            example="In <b>Valid/Invalid</b> mode: Creator A has 72 issues = 65 Valid + 7 Invalid → stack shows 65 emerald + 7 terracotta. "
-                    "In <b>RFH/Bug</b> mode: same Creator A has 72 issues = 62 RFH + 10 Bug → stack shows 62 steel blue + 10 terracotta.",
-            edge="Rows with blank Creator are excluded.",
-        )
-
-    # --- Period dropdown ----------------------------------------------------
-    st.markdown(
-        f'<div style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
-        f'letter-spacing:0.16em;text-transform:uppercase;color:{INK};margin:32px 0 12px 0;">'
-        f'Reporting period dropdown</div>',
-        unsafe_allow_html=True,
+    # ─── Card 5: Data explorer ───────────────────────────────────────
+    _calc_card(
+        "Data explorer tab",
+        "explorer",
+        [
+            ("builder", "Custom export builder", dict(
+                what="A flexible filter tool: build any number of conditions, combine them with AND or OR, pick the columns you want, and download as Excel.",
+                source="Every column in the dataset is available as a filter or as an export column.",
+                how="Each condition is <code>column &lt;operator&gt; value</code>. Operators include equals, not equals, contains, does not contain, is one of, is not one of. The 'Match' toggle (All / Any) controls whether all conditions must be true (AND) or just at least one (OR).",
+                example="Two conditions — <code>Priority_Short equals P1</code> AND <code>Validity equals Invalid</code> — return 8 rows. Switching Match to Any (OR) returns 130 rows.",
+                edge="If a column has only blank or duplicate values for the operator chosen, the dropdown will gracefully empty out and no rows match.",
+            )),
+        ],
     )
 
-    with st.expander("How periods are determined", expanded=False):
-        _calc_card(
-            what="The dropdown controls which subset of rows the entire dashboard uses.",
-            source="The <b>sheet name</b> each row was loaded from — stored internally as a <code>Quarter Label</code> column.",
-            how="Each quarter sheet (e.g. <code>Q1_2026</code>) is loaded and tagged with a display label (<code>Q1 2026</code>). "
-                "When the dropdown changes, the dashboard filters rows by their tagged label. <code>All Data</code> applies no filter. "
-                "<code>H1 FY26</code> = Q1 + Q2 of fiscal year 26. <code>H2 FY26</code> = Q3 + Q4.",
-            example="Selecting <code>Q2 2026</code> shows only the 302 rows that came from the Q2_2026 sheet.",
-            edge="The dashboard does NOT do its own date math to figure out which quarter a row belongs to — "
-                 "it trusts the sheet name. So if a row is in the Q2_2026 sheet, it's treated as Q2 2026 regardless "
-                 "of what its Resolution Date says. This is intentional: your upstream Python script already does the "
-                 "quarter-bucketing, and we don't want two systems disagreeing.",
-        )
+    # ─── Card 6: Reporting period dropdown ───────────────────────────
+    _calc_card(
+        "Reporting period dropdown",
+        "period",
+        [
+            ("howperiods", "How periods are determined", dict(
+                what="The dropdown controls which subset of rows the entire dashboard uses.",
+                source="The <b>sheet name</b> each row was loaded from — stored internally as a <code>Quarter Label</code> column.",
+                how="Each quarter sheet (e.g. <code>Q1_2026</code>) is loaded and tagged with a display label (<code>Q1 2026</code>). "
+                    "When the dropdown changes, the dashboard filters rows by their tagged label. <code>All Data</code> applies no filter. "
+                    "<code>H1 FY26</code> = Q1 + Q2 of fiscal year 26. <code>H2 FY26</code> = Q3 + Q4.",
+                example="Selecting <code>Q2 2026</code> shows only the 162 rows that came from the Q2_2026 sheet.",
+                edge="The dashboard does NOT do its own date math to figure out which quarter a row belongs to — "
+                     "it trusts the sheet name. So if a row is in the Q2_2026 sheet, it's treated as Q2 2026 regardless "
+                     "of what its Resolution Date says. This is intentional: your upstream Python script already does the "
+                     "quarter-bucketing, and we don't want two systems disagreeing.",
+            )),
+        ],
+    )
 
     # Footer note
     st.markdown(
@@ -2793,39 +2909,71 @@ with tab5:
         unsafe_allow_html=True,
     )
 
-# Scoped CSS for the How we calculate tab — make expanders feel premium
+# Scoped CSS for the calc bricks — make buttons feel like solid bricks,
+# active state in dark ink + white text matching the navigation tabs.
 st.markdown(
     f"""
 <style>
-  /* The expander headers — clean cards with hover lift */
-  [data-testid="stExpander"] {{
-    border: 1px solid {BORDER} !important;
-    border-radius: 10px !important;
-    background: {SURFACE};
-    margin-bottom: 8px !important;
-    box-shadow: 0 1px 2px rgba(26, 26, 26, 0.03);
-    transition: all 0.15s ease;
-  }}
-  [data-testid="stExpander"]:hover {{
-    border-color: {CHART_INDIGO} !important;
-    box-shadow: 0 4px 12px rgba(124, 111, 232, 0.10);
-  }}
-  [data-testid="stExpander"] summary {{
+  /* Brick buttons inside the calc cards */
+  div[class*="st-key-calc_card_"] .stButton > button {{
     font-family: 'Inter', sans-serif !important;
-    font-size: 0.96rem !important;
+    font-size: 0.9rem !important;
     font-weight: 600 !important;
     color: {INK} !important;
-    padding: 14px 18px !important;
+    background: {SURFACE} !important;
+    border: 1px solid {BORDER} !important;
+    border-radius: 8px !important;
+    padding: 12px 16px !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    transition: all 0.15s ease !important;
+    height: auto !important;
+    white-space: normal !important;
+    line-height: 1.4 !important;
   }}
-  [data-testid="stExpander"] summary:hover {{
-    color: {CHART_INDIGO_DEEP} !important;
+  /* Force ink color on all nested elements (Streamlit wraps button text in <p>) */
+  div[class*="st-key-calc_card_"] .stButton > button p,
+  div[class*="st-key-calc_card_"] .stButton > button span,
+  div[class*="st-key-calc_card_"] .stButton > button div {{
+    color: {INK} !important;
+    font-weight: 600 !important;
   }}
-  /* Body content padding */
-  [data-testid="stExpander"] [data-testid="stExpanderDetails"] {{
-    padding: 0 18px 16px 18px !important;
+  div[class*="st-key-calc_card_"] .stButton > button:hover {{
+    background: rgba(124, 111, 232, 0.08) !important;
+    border-color: {CHART_INDIGO} !important;
+    color: {INK} !important;
   }}
-  /* Inline code styling inside the cards */
-  [data-testid="stExpander"] code {{
+  div[class*="st-key-calc_card_"] .stButton > button:hover p,
+  div[class*="st-key-calc_card_"] .stButton > button:hover span,
+  div[class*="st-key-calc_card_"] .stButton > button:hover div {{
+    color: {INK} !important;
+  }}
+  /* Active brick — solid dark ink background, pure white text */
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"] {{
+    background: {INK} !important;
+    color: #FFFFFF !important;
+    border-color: {INK} !important;
+    box-shadow: 0 2px 6px rgba(26, 26, 26, 0.2);
+  }}
+  /* Defeat BaseWeb's nested-element color overrides — force white on every
+     descendant of the active button so the text contrasts the dark background */
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"] p,
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"] span,
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"] div {{
+    color: #FFFFFF !important;
+    font-weight: 700 !important;
+  }}
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"]:hover {{
+    background: {INK} !important;
+    color: #FFFFFF !important;
+  }}
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"]:hover p,
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"]:hover span,
+  div[class*="st-key-calc_card_"] .stButton > button[kind="primary"]:hover div {{
+    color: #FFFFFF !important;
+  }}
+  /* Inline code styling inside the calc body */
+  div[class*="st-key-calc_card_"] code {{
     background: rgba(124, 111, 232, 0.08);
     color: {CHART_INDIGO_DEEP};
     padding: 1px 6px;

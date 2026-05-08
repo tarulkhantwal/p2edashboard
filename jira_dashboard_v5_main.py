@@ -2805,6 +2805,20 @@ with tab4:
     # Render each filter row in a natural-language layout:
     # [WHERE Priority] [is] [P1]  [✕]
     OPERATORS = ["is", "is not", "contains", "does not contain"]
+    # Date columns get their own operator set + a calendar value picker.
+    # Detect a date column by dtype rather than name so this works for any
+    # future date columns the data team adds.
+    DATE_OPERATORS = ["on", "on or after", "on or before", "between"]
+
+    def is_date_column(frame: pd.DataFrame, column: str) -> bool:
+        """True if the column has a datetime dtype (after parse_date_columns).
+        This is what gates the date-aware operator set + calendar picker."""
+        if column not in frame.columns:
+            return False
+        try:
+            return pd.api.types.is_datetime64_any_dtype(frame[column])
+        except Exception:
+            return False
 
     for i, flt in enumerate(st.session_state.explorer_filters):
         row_cols = st.columns([0.6, 2.2, 1.5, 3, 0.8])
@@ -2838,23 +2852,100 @@ with tab4:
             )
             flt["column"] = col_choice
 
+        # Switch operator + value widgets based on whether the column is a date.
+        col_is_date = is_date_column(df, col_choice)
+        operators_for_col = DATE_OPERATORS if col_is_date else OPERATORS
+
         # Operator picker
         with row_cols[2]:
-            current_op = flt.get("op") or "is"
-            if current_op not in OPERATORS:
-                current_op = "is"
+            current_op = flt.get("op") or operators_for_col[0]
+            if current_op not in operators_for_col:
+                # User just switched between a text column and a date column;
+                # reset to that operator-set's default rather than error.
+                current_op = operators_for_col[0]
             op_choice = st.selectbox(
                 "Operator",
-                OPERATORS,
-                index=OPERATORS.index(current_op),
+                operators_for_col,
+                index=operators_for_col.index(current_op),
                 key=f"flt_op_{i}",
                 label_visibility="collapsed",
             )
             flt["op"] = op_choice
 
-        # Value picker — dropdown for "is"/"is not", text input for "contains"
+        # Value picker — three branches:
+        #   1. Date column → calendar picker(s). "between" shows two dates.
+        #   2. is / is not → dropdown of distinct values.
+        #   3. contains / does not contain → freeform text input.
         with row_cols[3]:
-            if op_choice in ("is", "is not"):
+            if col_is_date:
+                # Compute sensible min/max bounds from the data so the picker
+                # opens on a relevant month. Falls back to today if data is empty.
+                date_series = pd.to_datetime(df[col_choice], errors="coerce").dropna()
+                if not date_series.empty:
+                    data_min = date_series.min().date()
+                    data_max = date_series.max().date()
+                    default_date = data_max  # most recent — what users usually want
+                else:
+                    data_min = data_max = default_date = pd.Timestamp.today().date()
+
+                # Persist previous selection across reruns when possible
+                prev_val = flt.get("value")
+                if op_choice == "between":
+                    # "between" needs two dates → render in a 2-col split.
+                    # Store the range as a tuple in flt["value"].
+                    if isinstance(prev_val, (list, tuple)) and len(prev_val) == 2:
+                        try:
+                            start_default = pd.to_datetime(prev_val[0]).date()
+                            end_default = pd.to_datetime(prev_val[1]).date()
+                        except Exception:
+                            start_default, end_default = data_min, data_max
+                    else:
+                        start_default, end_default = data_min, data_max
+
+                    sub_cols = st.columns(2)
+                    with sub_cols[0]:
+                        start_date = st.date_input(
+                            "From",
+                            value=start_default,
+                            min_value=data_min,
+                            max_value=data_max,
+                            key=f"flt_val_date_start_{i}",
+                            label_visibility="collapsed",
+                        )
+                    with sub_cols[1]:
+                        end_date = st.date_input(
+                            "To",
+                            value=end_default,
+                            min_value=data_min,
+                            max_value=data_max,
+                            key=f"flt_val_date_end_{i}",
+                            label_visibility="collapsed",
+                        )
+                    val = (start_date, end_date)
+                else:
+                    # Single-date picker for "on", "on or after", "on or before"
+                    if isinstance(prev_val, (list, tuple)):
+                        # User just switched from "between" — collapse to first
+                        try:
+                            single_default = pd.to_datetime(prev_val[0]).date()
+                        except Exception:
+                            single_default = default_date
+                    elif prev_val:
+                        try:
+                            single_default = pd.to_datetime(prev_val).date()
+                        except Exception:
+                            single_default = default_date
+                    else:
+                        single_default = default_date
+                    val = st.date_input(
+                        "Date",
+                        value=single_default,
+                        min_value=data_min,
+                        max_value=data_max,
+                        key=f"flt_val_date_{i}",
+                        label_visibility="collapsed",
+                    )
+            elif op_choice in ("is", "is not"):
                 opts = build_options(df, col_choice)
                 if not opts:
                     opts = ["(blank)"]
@@ -2894,13 +2985,45 @@ with tab4:
         """
         # Default = "match every row" so an invalid spec passes through harmlessly
         all_true = pd.Series(True, index=frame.index)
-        if column not in frame.columns or value is None or value == "":
+        if column not in frame.columns or value is None:
+            return all_true
+
+        op = (operator or "is").lower().strip()
+
+        # Date branch — runs whenever the column is datetime-typed AND the
+        # operator is one of the date operators. Dates compare day-by-day
+        # (timestamps normalized to date) so "on 2026-04-15" matches every
+        # Jira created on that day regardless of time-of-day.
+        if op in ("on", "on or after", "on or before", "between") and pd.api.types.is_datetime64_any_dtype(frame[column]):
+            series_dt = pd.to_datetime(frame[column], errors="coerce").dt.date
+            try:
+                if op == "between":
+                    if not isinstance(value, (list, tuple)) or len(value) != 2:
+                        return all_true
+                    start_d = pd.to_datetime(value[0]).date()
+                    end_d = pd.to_datetime(value[1]).date()
+                    if start_d > end_d:
+                        start_d, end_d = end_d, start_d  # accept reversed input gracefully
+                    return (series_dt >= start_d) & (series_dt <= end_d)
+                target = pd.to_datetime(value).date()
+                if op == "on":
+                    return series_dt == target
+                if op == "on or after":
+                    return series_dt >= target
+                if op == "on or before":
+                    return series_dt <= target
+            except Exception:
+                # Bad date input → no-op, all rows pass through
+                return all_true
+            return all_true
+
+        # Text branch (existing logic)
+        if value == "":
             return all_true
         series = frame[column].map(normalise_value).astype(str)
         value_str = normalise_value(value) if operator in ("is", "is not") else str(value).strip()
         if not value_str:
             return all_true
-        op = (operator or "is").lower().strip()
         if op == "is":
             return series.str.lower() == value_str.lower()
         if op == "is not":
@@ -2940,6 +3063,25 @@ with tab4:
 
     # Active filters badge strip — visual confirmation of what's applied
     if active_filters:
+        # Helper to render the value side of each badge. Date tuples (from
+        # the "between" operator) need to be unpacked into "YYYY-MM-DD to
+        # YYYY-MM-DD" — otherwise Python's default tuple repr leaks through.
+        def format_badge_value(value):
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                try:
+                    a = pd.to_datetime(value[0]).strftime("%Y-%m-%d")
+                    b = pd.to_datetime(value[1]).strftime("%Y-%m-%d")
+                    return f"{a} to {b}"
+                except Exception:
+                    return str(value)
+            try:
+                # Single date object → format consistently
+                if hasattr(value, "strftime"):
+                    return value.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+            return str(value)
+
         badge_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 12px 0;">'
         for idx, (col, op, val) in enumerate(active_filters):
             # Connector word between badges — shows the user how their
@@ -2961,7 +3103,7 @@ with tab4:
                 f'color:{CHART_INDIGO_DEEP};border:1px solid rgba(124,111,232,0.20);'
                 f'font-family:Inter,sans-serif;font-size:0.8rem;font-weight:600;">'
                 f'{col_display(col)} <span style="color:{MUTED};font-weight:500">{op}</span> '
-                f'<b>{val}</b></span>'
+                f'<b>{format_badge_value(val)}</b></span>'
             )
         badge_html += "</div>"
         st.markdown(badge_html, unsafe_allow_html=True)

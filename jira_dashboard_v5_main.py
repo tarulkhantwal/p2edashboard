@@ -1006,17 +1006,32 @@ period_options, period_map = build_reporting_period_options(df_source)
 if "reporting_period" not in st.session_state or st.session_state.reporting_period not in period_options:
     st.session_state.reporting_period = period_options[0]
 
+# Read the user's current view choice early, BEFORE rendering the period
+# selector. The view selector itself renders later in the page, but its
+# session_state key persists across reruns, so by the second render we know
+# which view is active and can hide the period dropdown when irrelevant.
+# First render fallback: assume "Resolved Jiras" (the default).
+_current_view_mode = st.session_state.get("dashboard_view_mode", "Resolved Jiras")
+_hide_period_picker = str(_current_view_mode).startswith("Created")
+
 # Minimalist period picker — just a clean compact selectbox.
 # Constrained to 240px width via scoped CSS, with a small label above and
 # a subtle indigo focus ring. No fancy widgets, no leaking panels — just
 # a dropdown that does one thing well.
+# Hidden entirely in the Created Jiras view — that view doesn't honor the
+# period filter, so showing a non-functional dropdown would mislead users.
 picker_container = st.container(key="period_picker")
 with picker_container:
-    reporting_period = st.selectbox(
-        "Reporting period",
-        period_options,
-        key="reporting_period",
-    )
+    if not _hide_period_picker:
+        reporting_period = st.selectbox(
+            "Reporting period",
+            period_options,
+            key="reporting_period",
+        )
+    else:
+        # Keep the variable defined for any downstream references, even
+        # though Created Jiras view ignores it. Use whatever's in session_state.
+        reporting_period = st.session_state.reporting_period
 
 st.markdown(
     f"""
@@ -1105,9 +1120,13 @@ with view_picker_container:
 st.markdown(
     f"""
 <style>
-  /* Right-align the whole picker so it sits in the top-right corner */
+  /* Right-align the whole picker so it sits in the top-right corner.
+     When the period selector is visible (Resolved view), pull the picker
+     UP with a negative margin so it sits beside the period dropdown rather
+     than below it. When the period selector is hidden (Created view), no
+     negative margin is needed — the picker just sits below the title block. */
   .st-key-view_picker {{
-    margin: -56px 0 12px 0;
+    margin: {"8px 0 16px 0" if _hide_period_picker else "-56px 0 12px 0"};
     display: flex;
     justify-content: flex-end;
   }}

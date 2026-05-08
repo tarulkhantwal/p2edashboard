@@ -1079,6 +1079,417 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# -- View mode selector ------------------------------------------------------
+# Top-level switch between two distinct dashboard experiences:
+#   • Main dashboard — resolution-date-based, has 5 tabs, period-driven.
+#   • Reports — creation-date-based, single page, independent of period.
+#
+# We surface this as a segmented control directly under the period selector
+# so leadership sees both controls at the top of the page, side-by-side
+# in the visual flow but logically distinct. Defaults to Main dashboard.
+view_picker_container = st.container(key="view_picker")
+with view_picker_container:
+    view_mode = st.radio(
+        "View",
+        ["Resolved Jiras", "Created Jiras"],
+        index=0,
+        horizontal=True,
+        key="dashboard_view_mode",
+        help="Switch between the resolution-based dashboard (default) and the creation-based report.",
+        label_visibility="collapsed",
+    )
+
+# Style the view picker as a subtle, right-aligned link-style control.
+# Intentionally low-key — Main dashboard is the default focus, Reports is a
+# discoverable side-option for anyone who wants the creation-based view.
+st.markdown(
+    f"""
+<style>
+  /* Right-align the whole picker so it sits in the top-right corner */
+  .st-key-view_picker {{
+    margin: -56px 0 12px 0;
+    display: flex;
+    justify-content: flex-end;
+  }}
+  .st-key-view_picker [data-testid="stHorizontalBlock"],
+  .st-key-view_picker [role="radiogroup"] {{
+    gap: 4px;
+    justify-content: flex-end;
+  }}
+  /* Inactive options — muted text, transparent background, no border */
+  .st-key-view_picker [role="radiogroup"] label {{
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.78rem !important;
+    font-weight: 500 !important;
+    color: {MUTED} !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    padding: 5px 12px !important;
+    transition: all 0.15s ease !important;
+    cursor: pointer !important;
+  }}
+  .st-key-view_picker [role="radiogroup"] label p,
+  .st-key-view_picker [role="radiogroup"] label span {{
+    color: {MUTED} !important;
+    font-weight: 500 !important;
+  }}
+  .st-key-view_picker [role="radiogroup"] label:hover {{
+    color: {INK} !important;
+    background: rgba(124, 111, 232, 0.06) !important;
+  }}
+  .st-key-view_picker [role="radiogroup"] label:hover p,
+  .st-key-view_picker [role="radiogroup"] label:hover span {{
+    color: {INK} !important;
+  }}
+  /* Hide the radio circle */
+  .st-key-view_picker [role="radiogroup"] label > div:first-child {{
+    display: none !important;
+  }}
+  /* Active option — subtle indigo underline, not a heavy filled button */
+  .st-key-view_picker [role="radiogroup"] label[data-checked="true"],
+  .st-key-view_picker [role="radiogroup"] label:has(input:checked) {{
+    background: rgba(124, 111, 232, 0.08) !important;
+    color: {INK} !important;
+    border-color: rgba(124, 111, 232, 0.25) !important;
+    font-weight: 600 !important;
+  }}
+  .st-key-view_picker [role="radiogroup"] label[data-checked="true"] p,
+  .st-key-view_picker [role="radiogroup"] label[data-checked="true"] span,
+  .st-key-view_picker [role="radiogroup"] label:has(input:checked) p,
+  .st-key-view_picker [role="radiogroup"] label:has(input:checked) span {{
+    color: {INK} !important;
+    font-weight: 600 !important;
+  }}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# Boolean for downstream logic — cleaner than string comparisons everywhere.
+is_reports_view = view_mode.startswith("Created")
+
+# ─── Reports view (top-level, separate from main dashboard) ─────────────
+# When the user picks 'Reports (created Jiras)' from the view selector,
+# we render this block and call st.stop() to skip the rest of the script.
+# That way the main-dashboard KPI strip and tabs don't render at all in
+# Reports mode — no double KPI strip, no confused state, just the report.
+if is_reports_view:
+    # -- REPORTS VIEW: Creation-date-based view (top-level, not a tab) -----------------------------------
+    # This tab shows Jira CREATION volume — completely separate logic from the
+    # rest of the dashboard. The other tabs are resolution-based (a Jira appears
+    # in the period where it was closed). Reports is creation-based (a Jira
+    # appears in the period where it was raised).
+    #
+    # Source: JIRA_Created sheet (NOT the Q1/Q2 quarter sheets, which only
+    # contain resolved issues). JIRA_Created has every Jira raised in each
+    # quarter, regardless of whether it's been closed.
+    #
+    # Important: this view IGNORES the sidebar's reporting-period dropdown.
+    # The dropdown applies to resolution-period thinking, which doesn't map
+    # cleanly to creation thinking. Reports has its own period control inside
+    # the tab.
+    if df_jira_created is None or df_jira_created.empty:
+        st.warning(
+            "JIRA_Created sheet not found in the source file. The Reports view "
+            "needs that sheet to compute creation-based metrics. Please ensure "
+            "the latest Excel file is being used."
+        )
+    else:
+        # Defensive copy + ensure dates parse correctly (the source column
+        # is already datetime64 from openpyxl, but coerce belt-and-suspenders).
+        df_jc = df_jira_created.copy()
+        df_jc["Creation Date"] = pd.to_datetime(df_jc["Creation Date"], errors="coerce")
+        df_jc = df_jc[df_jc["Creation Date"].notna()].copy()
+        df_jc["Quarter"] = df_jc["Quarter"].astype(str).str.strip()
+
+        # ─── Headline KPIs ────────────────────────────────────────────────
+        # Three tiles: total created · created in Q1 · created in Q2.
+        # No "Resolved" tile — that's not what this view is about.
+        total_created = len(df_jc)
+        q1_created = int((df_jc["Quarter"] == "Q1_2026").sum())
+        q2_created = int((df_jc["Quarter"] == "Q2_2026").sum())
+
+        # Context badge — mirrors the "Showing resolved Jiras" badge on the
+        # main dashboard so leadership has matching visual cues. Indigo here,
+        # emerald on the main view — different colors signal different lenses.
+        st.markdown(
+            f'<div style="display:inline-flex;align-items:center;gap:8px;'
+            f'background:rgba(124,111,232,0.10);border:1px solid {CHART_INDIGO};'
+            f'border-radius:999px;padding:5px 14px;margin:0 0 14px 0;">'
+            f'<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:{CHART_INDIGO_DEEP};"></span>'
+            f'<span style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
+            f'letter-spacing:0.08em;text-transform:uppercase;color:{CHART_INDIGO_DEEP};">'
+            f'Showing created Jiras · all quarters'
+            f'</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        rcols = st.columns(3)
+        with rcols[0]:
+            st.markdown(
+                f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:22px 26px;box-shadow:{SHADOW};">'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">Total Jiras created</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{total_created:,}</div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">across all quarters</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with rcols[1]:
+            st.markdown(
+                f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:22px 26px;box-shadow:{SHADOW};">'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{CHART_INDIGO_DEEP};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">Created in Q1 2026</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{q1_created:,}</div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">Dec 2025 – Feb 2026</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with rcols[2]:
+            st.markdown(
+                f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:22px 26px;box-shadow:{SHADOW};">'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{CHART_EMERALD_DEEP};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">Created in Q2 2026</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{q2_created:,}</div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">Mar 2026 – May 2026</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
+        # ─── Calendar year selector ──────────────────────────────────────
+        # Lets leadership filter the rest of this view to a specific year.
+        # Defaults to "All" so they see the whole picture first.
+        section("Filter by year (optional)")
+
+        years_available = sorted(df_jc["Creation Date"].dt.year.dropna().astype(int).unique().tolist())
+        year_options = ["All"] + [str(y) for y in years_available]
+        sel_year = st.selectbox(
+            "Calendar year",
+            options=year_options,
+            index=0,
+            key="reports_year_filter",
+            help="Filters the charts below by Jira creation year. Affects only this view.",
+        )
+
+        if sel_year == "All":
+            df_jc_view = df_jc
+            year_label = "all years"
+        else:
+            df_jc_view = df_jc[df_jc["Creation Date"].dt.year == int(sel_year)]
+            year_label = sel_year
+
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # ─── Monthly creation trend ───────────────────────────────────────
+        section(f"Jiras created per month · {year_label}")
+
+        if df_jc_view.empty:
+            st.info("No data in the selected year.")
+        else:
+            monthly = (
+                df_jc_view.assign(Month=df_jc_view["Creation Date"].dt.to_period("M").astype(str))
+                .groupby("Month").size().reset_index(name="Count")
+                .sort_values("Month")
+            )
+
+            # Convert YYYY-MM to "Mon YYYY" for x-axis readability
+            monthly["MonthLabel"] = pd.to_datetime(monthly["Month"]).dt.strftime("%b %Y")
+
+            fig = go.Figure()
+            counts = monthly["Count"].tolist()
+            colors = bar_palette(counts, CHART_STEEL, CHART_STEEL_DEEP)
+            fig.add_trace(go.Bar(
+                x=monthly["MonthLabel"].tolist(),
+                y=counts,
+                marker=dict(color=colors, line=dict(width=0)),
+                text=[f"<b>{v}</b>" for v in counts],
+                textposition="outside",
+                textfont=dict(color=INK, size=12, family="Inter"),
+                hovertemplate="<b>%{x}</b><br>%{y} Jiras created<extra></extra>",
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                xaxis_title="",
+                yaxis_title="",
+                yaxis=dict(rangemode="tozero"),
+                height=380,
+                showlegend=False,
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="reports_monthly_trend")
+
+            # A small summary line below the chart with the actual numbers
+            month_summary = " · ".join(f"<b style='color:{INK}'>{r['MonthLabel']}: {r['Count']}</b>" for _, r in monthly.iterrows())
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif;font-size:0.85rem;color:{SUBTEXT};line-height:1.6;margin:-6px 0 8px 0;">'
+                f'{month_summary}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ─── Quarter comparison ──────────────────────────────────────────
+        # Build the quarter list dynamically from whatever's actually in the
+        # filtered data. This is future-proof for Q3, Q4, and beyond — the
+        # bars and labels will grow automatically as new quarter sheets
+        # land in JIRA_Created.
+        # Uses sheet_to_quarter_label() (the same helper the rest of the
+        # dashboard uses) so the x-axis displays clean labels like "Q1 2026"
+        # instead of the raw "Q1_2026" tag.
+        section(f"Quarter-wise comparison · {year_label}")
+
+        if df_jc_view.empty:
+            st.info("No data in the selected year.")
+        else:
+            # Get every quarter that actually has rows in the filtered view,
+            # ordered by FY (year, quarter) using the existing sort key.
+            quarters_present = sorted(
+                df_jc_view["Quarter"].dropna().astype(str).str.strip().unique().tolist(),
+                key=quarter_sheet_sort_key,
+            )
+
+            q_values = [int((df_jc_view["Quarter"] == q).sum()) for q in quarters_present]
+            # Display labels: "Q1_2026" → "Q1 2026". Falls back to the raw
+            # tag if the helper can't parse it (defensive — should never
+            # happen with well-formed sheet names but doesn't hurt).
+            q_labels = [sheet_to_quarter_label(q) or q for q in quarters_present]
+
+            # Color cycle: indigo, emerald, terracotta, honey — picks up
+            # additional palette entries as more quarters are added. We
+            # use the *_DEEP variants so each bar reads as a solid block.
+            quarter_palette = [
+                CHART_INDIGO_DEEP,
+                CHART_EMERALD_DEEP,
+                CHART_TERRACOTTA_DEEP,
+                CHART_HONEY_DEEP,
+                CHART_PLUM_DEEP,
+                CHART_STEEL_DEEP,
+            ]
+            q_colors = [quarter_palette[i % len(quarter_palette)] for i in range(len(quarters_present))]
+
+            # Bar widths scale slightly with the number of quarters so two
+            # bars don't look too narrow and six don't look too crowded.
+            bar_width = max(0.35, 0.7 - 0.05 * len(quarters_present))
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=q_labels,
+                y=q_values,
+                marker=dict(color=q_colors, line=dict(width=0)),
+                text=[f"<b>{v}</b>" for v in q_values],
+                textposition="outside",
+                textfont=dict(color=INK, size=16, family="Inter"),
+                hovertemplate="<b>%{x}</b><br>%{y} Jiras created<extra></extra>",
+                width=[bar_width] * len(quarters_present),
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                xaxis_title="",
+                yaxis_title="",
+                yaxis=dict(rangemode="tozero", visible=False),
+                xaxis=dict(tickfont=dict(color=INK, size=14, family="Inter")),
+                height=320,
+                showlegend=False,
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="reports_q_compare")
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ─── Top customers (creation-based) ──────────────────────────────
+        section(f"Top customers by Jiras created · {year_label}")
+
+        if df_jc_view.empty or "Customer" not in df_jc_view.columns:
+            st.info("No customer data available.")
+        else:
+            cust_counts = (
+                df_jc_view["Customer"].dropna().astype(str).str.strip()
+                .replace("", pd.NA).dropna()
+                .value_counts().head(12).reset_index()
+            )
+            cust_counts.columns = ["Customer", "Count"]
+
+            fig = go.Figure()
+            counts_list = cust_counts["Count"].tolist()
+            colors = bar_palette(counts_list, CHART_PLUM, CHART_PLUM_DEEP)
+            fig.add_trace(go.Bar(
+                x=counts_list,
+                y=cust_counts["Customer"].tolist(),
+                orientation="h",
+                marker=dict(color=colors, line=dict(width=0)),
+                text=[f"<b>{v}</b>" for v in counts_list],
+                textposition="outside",
+                textfont=dict(color=INK, size=12, family="Inter"),
+                hovertemplate="<b>%{y}</b><br>%{x} Jiras created<extra></extra>",
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="",
+                yaxis_title="",
+                height=420,
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="reports_top_customers")
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ─── Top affected versions (creation-based) ──────────────────────
+        section(f"Top affected versions · {year_label}")
+
+        if df_jc_view.empty or "Affects Version" not in df_jc_view.columns:
+            st.info("No version data available.")
+        else:
+            version_counts = (
+                df_jc_view["Affects Version"].dropna().astype(str).str.strip()
+                .replace("", pd.NA).dropna()
+                .value_counts().head(8).reset_index()
+            )
+            version_counts.columns = ["Version", "Count"]
+
+            fig = go.Figure()
+            counts_list = version_counts["Count"].tolist()
+            colors = bar_palette(counts_list, CHART_HONEY, CHART_HONEY_DEEP)
+            fig.add_trace(go.Bar(
+                x=version_counts["Version"].tolist(),
+                y=counts_list,
+                marker=dict(color=colors, line=dict(width=0)),
+                text=[f"<b>{v}</b>" for v in counts_list],
+                textposition="outside",
+                textfont=dict(color=INK, size=12, family="Inter"),
+                hovertemplate="<b>%{x}</b><br>%{y} Jiras<extra></extra>",
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                xaxis_title="",
+                yaxis_title="",
+                yaxis=dict(rangemode="tozero"),
+                height=360,
+                showlegend=False,
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="reports_top_versions")
+
+        # Footnote explaining the data source
+        st.markdown(
+            f'<div style="font-family:Inter,sans-serif;font-size:0.82rem;color:{MUTED};'
+            f'background:rgba(124,111,232,0.05);border-left:3px solid {CHART_INDIGO};'
+            f'padding:14px 18px;border-radius:6px;margin:32px 0 12px 0;line-height:1.6;">'
+            f'<b style="color:{INK}">Note:</b> This tab uses the <code>JIRA_Created</code> sheet, '
+            f'which tracks every Jira <b>raised</b> in each quarter (regardless of whether it has been resolved). '
+            f'This is different from the rest of the dashboard, which is based on resolved Jiras only. '
+            f'The reporting-period dropdown in the sidebar does not affect this view.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+    # Stop here — none of the main dashboard renders in Reports view.
+    st.stop()
+
+
 # Apply period filter before sidebar filters -----------------
 df_period = apply_reporting_period(df_source, reporting_period, period_map)
 
@@ -1230,6 +1641,25 @@ def kpi_caption(pct: float) -> str:
 # We deliberately don't show a "Resolved" tile because the underlying source
 # data is already filtered to resolved Jiras only. Showing 100% Resolved would
 # be redundant and risk implying these are open-vs-closed counts.
+
+# Context badge directly above the KPI strip — makes it unmissable that these
+# numbers represent CLOSED work in the selected reporting period. Without this,
+# leadership might mentally compare 304 (here) against 360 (Reports view) and
+# assume it's the same population. The badge is small but does heavy lifting:
+# it pre-empts a recurring source of confusion in cross-tab comparisons.
+st.markdown(
+    f'<div style="display:inline-flex;align-items:center;gap:8px;'
+    f'background:rgba(63,139,126,0.10);border:1px solid {CHART_EMERALD};'
+    f'border-radius:999px;padding:5px 14px;margin:0 0 14px 0;">'
+    f'<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:{CHART_EMERALD_DEEP};"></span>'
+    f'<span style="font-family:Inter,sans-serif;font-size:0.74rem;font-weight:700;'
+    f'letter-spacing:0.08em;text-transform:uppercase;color:{CHART_EMERALD_DEEP};">'
+    f'Showing resolved Jiras · {reporting_period}'
+    f'</span>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
+
 kpi_cols = st.columns(5)
 with kpi_cols[0]:
     st.metric("Total issues", f"{total_issues:,}")

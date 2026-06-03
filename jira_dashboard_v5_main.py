@@ -11,7 +11,7 @@ import streamlit as st
 
 # -- Default path config (edit these if the file moves) -----------------------
 DEFAULT_FOLDER = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE = "JIRA_P2E_2026.xlsx"
+DEFAULT_FILE = "JIRA_P2E_2026_latest.xlsx"
 
 # -- Page config --------------------------------------------------------------
 st.set_page_config(
@@ -1114,26 +1114,31 @@ with view_picker_container:
         label_visibility="collapsed",
     )
 
-# Style the view picker as a subtle, right-aligned link-style control.
-# Intentionally low-key — Main dashboard is the default focus, Reports is a
-# discoverable side-option for anyone who wants the creation-based view.
+# Style the view picker so the two options sit at opposite ends of the
+# header row — Resolved Jiras on the left, Created Jiras on the right.
+# Both are part of the same radio group; CSS just spreads them apart
+# using justify-content: space-between on the radiogroup container.
+#
+# Position: the picker sits below the title block with normal spacing
+# (no negative margin), so it never overlaps the description text. This
+# prevents the "going behind the text" issue caused by the previous
+# negative-margin layout.
 st.markdown(
     f"""
 <style>
-  /* Right-align the whole picker so it sits in the top-right corner.
-     When the period selector is visible (Resolved view), pull the picker
-     UP with a negative margin so it sits beside the period dropdown rather
-     than below it. When the period selector is hidden (Created view), no
-     negative margin is needed — the picker just sits below the title block. */
+  /* The container itself just provides vertical spacing — no flex tricks here */
   .st-key-view_picker {{
-    margin: {"8px 0 16px 0" if _hide_period_picker else "-56px 0 12px 0"};
-    display: flex;
-    justify-content: flex-end;
+    margin: 16px 0 20px 0;
   }}
+  /* The radio group inside is what we spread: Resolved on left, Created on right */
   .st-key-view_picker [data-testid="stHorizontalBlock"],
   .st-key-view_picker [role="radiogroup"] {{
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
     gap: 4px;
-    justify-content: flex-end;
   }}
   /* Inactive options — muted text, transparent background, no border */
   .st-key-view_picker [role="radiogroup"] label {{
@@ -1188,50 +1193,50 @@ st.markdown(
 # Boolean for downstream logic — cleaner than string comparisons everywhere.
 is_reports_view = view_mode.startswith("Created")
 
-# ─── Reports view (top-level, separate from main dashboard) ─────────────
-# When the user picks 'Reports (created Jiras)' from the view selector,
-# we render this block and call st.stop() to skip the rest of the script.
-# That way the main-dashboard KPI strip and tabs don't render at all in
-# Reports mode — no double KPI strip, no confused state, just the report.
+# ─── Created Jiras view (lens-aware top-level view) ─────────────────────
+# When the user picks 'Created Jiras' from the view picker, we render this
+# minimal block (KPI strip + context badge) and call st.stop() to skip the
+# rest of the script. The customer-centric breakdowns leadership uses live
+# in the Customers tab on the Resolved view — same dashboard, different lens.
+#
+# Note: the deeper Created-Jira charts (monthly trend, quarter-over-quarter
+# comparison, top customers, top versions) were retired in v9.6 when the
+# Customers tab replaced them with lens-aware versions. This block now just
+# surfaces the 5 leadership-relevant KPIs at the top of the Created view.
 if is_reports_view:
-    # -- REPORTS VIEW: Creation-date-based view (top-level, not a tab) -----------------------------------
-    # This tab shows Jira CREATION volume — completely separate logic from the
-    # rest of the dashboard. The other tabs are resolution-based (a Jira appears
-    # in the period where it was closed). Reports is creation-based (a Jira
-    # appears in the period where it was raised).
-    #
-    # Source: JIRA_Created sheet (NOT the Q1/Q2 quarter sheets, which only
-    # contain resolved issues). JIRA_Created has every Jira raised in each
-    # quarter, regardless of whether it's been closed.
-    #
-    # Important: this view IGNORES the sidebar's reporting-period dropdown.
-    # The dropdown applies to resolution-period thinking, which doesn't map
-    # cleanly to creation thinking. Reports has its own period control inside
-    # the tab.
     if df_jira_created is None or df_jira_created.empty:
         st.warning(
-            "JIRA_Created sheet not found in the source file. The Reports view "
+            "JIRA_Created sheet not found in the source file. The Created Jiras view "
             "needs that sheet to compute creation-based metrics. Please ensure "
             "the latest Excel file is being used."
         )
     else:
-        # Defensive copy + ensure dates parse correctly (the source column
-        # is already datetime64 from openpyxl, but coerce belt-and-suspenders).
+        # Defensive copy + ensure dates parse correctly
         df_jc = df_jira_created.copy()
         df_jc["Creation Date"] = pd.to_datetime(df_jc["Creation Date"], errors="coerce")
         df_jc = df_jc[df_jc["Creation Date"].notna()].copy()
-        df_jc["Quarter"] = df_jc["Quarter"].astype(str).str.strip()
 
-        # ─── Headline KPIs ────────────────────────────────────────────────
-        # Three tiles: total created · created in Q1 · created in Q2.
-        # No "Resolved" tile — that's not what this view is about.
+        # ─── Headline KPI strip (5 tiles) ────────────────────────────────
+        # Director-relevant cuts: how much came in, how much is open, how
+        # much closed, P1 volume, and P1 still-open (the leadership signal).
+        #
+        # IMPORTANT — "Open" definition on this view:
+        # We exclude Deferred Jiras from "Open" because Deferred = intentionally
+        # not being worked on. Counting them as "Open" inflates the backlog
+        # signal that leadership cares about. This matches how Yash's pipeline
+        # treats Deferred in the quarter sheets (also excluded). The same
+        # definition is used by the "Open Jiras by age" table below so both
+        # numbers stay consistent.
+        CLOSED_OR_DEFERRED = ["Resolved", "Closed", "Deferred"]
+
         total_created = len(df_jc)
-        q1_created = int((df_jc["Quarter"] == "Q1_2026").sum())
-        q2_created = int((df_jc["Quarter"] == "Q2_2026").sum())
+        open_count = int((~df_jc["Status"].isin(CLOSED_OR_DEFERRED)).sum())
+        closed_count = int(df_jc["Status"].isin(["Resolved", "Closed"]).sum())
+        p1_critical = int((df_jc["Priority"] == "P1").sum())
+        p1_still_open = int(((df_jc["Priority"] == "P1") &
+                             (~df_jc["Status"].isin(CLOSED_OR_DEFERRED))).sum())
 
-        # Context badge — mirrors the "Showing resolved Jiras" badge on the
-        # main dashboard so leadership has matching visual cues. Indigo here,
-        # emerald on the main view — different colors signal different lenses.
+        # Context badge — indigo to distinguish from the Resolved view's emerald
         st.markdown(
             f'<div style="display:inline-flex;align-items:center;gap:8px;'
             f'background:rgba(124,111,232,0.10);border:1px solid {CHART_INDIGO};'
@@ -1245,267 +1250,354 @@ if is_reports_view:
             unsafe_allow_html=True,
         )
 
-        rcols = st.columns(3)
-        with rcols[0]:
-            st.markdown(
+        # 5-tile KPI strip
+        rcols = st.columns(5)
+
+        def _kpi_tile(col, label, value, sub, label_color=MUTED):
+            col.markdown(
                 f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:22px 26px;box-shadow:{SHADOW};">'
-                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">Total Jiras created</div>'
-                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{total_created:,}</div>'
-                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">across all quarters</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        with rcols[1]:
-            st.markdown(
-                f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:22px 26px;box-shadow:{SHADOW};">'
-                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{CHART_INDIGO_DEEP};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">Created in Q1 2026</div>'
-                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{q1_created:,}</div>'
-                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">Dec 2025 – Feb 2026</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        with rcols[2]:
-            st.markdown(
-                f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;padding:22px 26px;box-shadow:{SHADOW};">'
-                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{CHART_EMERALD_DEEP};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">Created in Q2 2026</div>'
-                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{q2_created:,}</div>'
-                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">Mar 2026 – May 2026</div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{label_color};letter-spacing:0.12em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">{label}</div>'
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:2.4rem;font-weight:600;color:{INK};line-height:1.1;">{value:,}</div>'
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{SUBTEXT};margin-top:4px;">{sub}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-        st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+        _kpi_tile(rcols[0], "Total created", total_created, "across all quarters")
+        _kpi_tile(rcols[1], "Open", open_count,
+                  f"{int(open_count/total_created*100) if total_created else 0}% of total")
+        _kpi_tile(rcols[2], "Closed", closed_count,
+                  f"{int(closed_count/total_created*100) if total_created else 0}% of total")
+        _kpi_tile(rcols[3], "P1 critical", p1_critical,
+                  f"{int(p1_critical/total_created*100) if total_created else 0}% of total",
+                  label_color=CHART_TERRACOTTA_DEEP)
+        _kpi_tile(rcols[4], "P1 still open", p1_still_open,
+                  f"{int(p1_still_open/p1_critical*100) if p1_critical else 0}% of P1s",
+                  label_color=CHART_TERRACOTTA_DEEP)
 
-        # ─── Calendar year selector ──────────────────────────────────────
-        # Lets leadership filter the rest of this view to a specific year.
-        # Defaults to "All" so they see the whole picture first.
-        section("Filter by year (optional)")
+        # Footnote explaining the Open definition — important because it
+        # differs from a naive "Status not Resolved/Closed" count by
+        # excluding Deferred. Deferred items are intentionally not being
+        # worked on, so counting them as Open inflates the backlog signal.
+        deferred_count = int((df_jc["Status"] == "Deferred").sum())
+        if deferred_count > 0:
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif;font-size:0.78rem;color:{MUTED};'
+                f'margin:10px 0 0 0;text-align:left;">'
+                f'<i>Open = actively being worked on. Excludes Deferred ({deferred_count}) '
+                f'and closed work.</i>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
-        years_available = sorted(df_jc["Creation Date"].dt.year.dropna().astype(int).unique().tolist())
-        year_options = ["All"] + [str(y) for y in years_available]
-        sel_year = st.selectbox(
-            "Calendar year",
-            options=year_options,
-            index=0,
-            key="reports_year_filter",
-            help="Filters the charts below by Jira creation year. Affects only this view.",
-        )
+        st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
 
-        if sel_year == "All":
-            df_jc_view = df_jc
-            year_label = "all years"
+        # ─── Monthly creation trend ──────────────────────────────────────
+        # Simple bar chart showing how many Jiras were created per month.
+        # Helps leadership spot intake spikes and seasonality. The peak
+        # month gets a deeper color treatment to draw the eye.
+        section("Jiras created per month")
+
+        # Group by month of creation, count per month
+        df_monthly = df_jc.copy()
+        df_monthly["Month"] = df_monthly["Creation Date"].dt.to_period("M")
+        monthly_counts = df_monthly.groupby("Month").size().reset_index(name="Count")
+        monthly_counts["Month Label"] = monthly_counts["Month"].dt.strftime("%b %Y")
+        monthly_counts["Month Sort"] = monthly_counts["Month"].dt.to_timestamp()
+        monthly_counts = monthly_counts.sort_values("Month Sort").reset_index(drop=True)
+
+        if monthly_counts.empty:
+            st.caption("No creation data available to plot.")
         else:
-            df_jc_view = df_jc[df_jc["Creation Date"].dt.year == int(sel_year)]
-            year_label = sel_year
-
-        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-
-        # ─── Monthly creation trend ───────────────────────────────────────
-        section(f"Jiras created per month · {year_label}")
-
-        if df_jc_view.empty:
-            st.info("No data in the selected year.")
-        else:
-            monthly = (
-                df_jc_view.assign(Month=df_jc_view["Creation Date"].dt.to_period("M").astype(str))
-                .groupby("Month").size().reset_index(name="Count")
-                .sort_values("Month")
-            )
-
-            # Convert YYYY-MM to "Mon YYYY" for x-axis readability
-            monthly["MonthLabel"] = pd.to_datetime(monthly["Month"]).dt.strftime("%b %Y")
+            # Highlight the peak month with the deep steel color, others muted
+            peak_idx = monthly_counts["Count"].idxmax()
+            colors = [
+                CHART_STEEL_DEEP if i == peak_idx else CHART_STEEL
+                for i in monthly_counts.index
+            ]
 
             fig = go.Figure()
-            counts = monthly["Count"].tolist()
-            colors = bar_palette(counts, CHART_STEEL, CHART_STEEL_DEEP)
             fig.add_trace(go.Bar(
-                x=monthly["MonthLabel"].tolist(),
-                y=counts,
+                x=monthly_counts["Month Label"].tolist(),
+                y=monthly_counts["Count"].tolist(),
                 marker=dict(color=colors, line=dict(width=0)),
-                text=[f"<b>{v}</b>" for v in counts],
+                text=[f"<b>{v}</b>" for v in monthly_counts["Count"].tolist()],
                 textposition="outside",
                 textfont=dict(color=INK, size=12, family="Inter"),
-                hovertemplate="<b>%{x}</b><br>%{y} Jiras created<extra></extra>",
+                hovertemplate="<b>%{x}</b><br>%{y} jiras created<extra></extra>",
                 cliponaxis=False,
             ))
             fig.update_layout(
                 xaxis_title="",
-                yaxis_title="",
-                yaxis=dict(rangemode="tozero"),
+                yaxis_title="Jiras created",
                 height=380,
                 showlegend=False,
             )
             chart_theme(fig)
-            st.plotly_chart(fig, use_container_width=True, key="reports_monthly_trend")
+            st.plotly_chart(fig, use_container_width=True, key="created_monthly_trend")
 
-            # A small summary line below the chart with the actual numbers
-            month_summary = " · ".join(f"<b style='color:{INK}'>{r['MonthLabel']}: {r['Count']}</b>" for _, r in monthly.iterrows())
-            st.markdown(
-                f'<div style="font-family:Inter,sans-serif;font-size:0.85rem;color:{SUBTEXT};line-height:1.6;margin:-6px 0 8px 0;">'
-                f'{month_summary}'
-                f'</div>',
+            peak_month = monthly_counts.loc[peak_idx, "Month Label"]
+            peak_count = int(monthly_counts.loc[peak_idx, "Count"])
+            st.caption(
+                f"Peak month: <b>{peak_month}</b> with {peak_count} Jiras created · "
+                f"{int(monthly_counts['Count'].sum()):,} total Jiras across {len(monthly_counts)} months.",
                 unsafe_allow_html=True,
             )
 
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
 
-        # ─── Quarter comparison ──────────────────────────────────────────
-        # Build the quarter list dynamically from whatever's actually in the
-        # filtered data. This is future-proof for Q3, Q4, and beyond — the
-        # bars and labels will grow automatically as new quarter sheets
-        # land in JIRA_Created.
-        # Uses sheet_to_quarter_label() (the same helper the rest of the
-        # dashboard uses) so the x-axis displays clean labels like "Q1 2026"
-        # instead of the raw "Q1_2026" tag.
-        section(f"Quarter-wise comparison · {year_label}")
+        # ─── Open Jiras by age ───────────────────────────────────────────
+        # Interactive table showing currently-open Jiras sorted by Age.
+        # Age = days since creation, calculated against a stable "as-of"
+        # date (max Resolution Date in dataset) so numbers don't drift
+        # when the same file is viewed on different days.
+        #
+        # Features:
+        #   • Filtered to OPEN Jiras only (Status NOT IN Resolved/Closed)
+        #   • Filters in collapsed expander: Customer, Priority, Status,
+        #     Creation Date range (smart preset dropdown)
+        #   • Pagination: 10 rows per page with Previous/Next buttons
+        #   • Sorted by Age descending (oldest open Jira at the top)
+        #
+        # Date filter semantics: shortcut "Today" uses ACTUAL today (wall
+        # clock) since users expect that. Age calculation continues to use
+        # the dataset's max Resolution Date for stability.
+        section("Open Jiras by age")
 
-        if df_jc_view.empty:
-            st.info("No data in the selected year.")
+        open_df = df_jc.copy()
+        open_df["Resolution Date"] = pd.to_datetime(open_df["Resolution Date"], errors="coerce")
+
+        # Filter to open only
+        # Filter to open only (uses the same CLOSED_OR_DEFERRED list defined
+        # near the KPI strip above — keeps the "Open: 126" KPI consistent
+        # with the row count of this table).
+        open_df = open_df[~open_df["Status"].isin(CLOSED_OR_DEFERRED)].copy()
+
+        # As-of date for Age calculation (stable across reloads)
+        asof_candidates = [
+            df_jc["Resolution Date"].dropna().max() if "Resolution Date" in df_jc.columns else pd.NaT,
+            df_jc["Creation Date"].dropna().max(),
+            pd.Timestamp.today(),
+        ]
+        asof_date = next((d for d in asof_candidates if pd.notna(d)), pd.Timestamp.today())
+        asof_date = pd.Timestamp(asof_date).normalize()
+
+        # Compute Age = as-of date − Creation Date (Resolution Date is null for all open)
+        open_df["Age (days)"] = (asof_date - open_df["Creation Date"]).dt.days
+        open_df = open_df[open_df["Age (days)"].notna() & (open_df["Age (days)"] >= 0)]
+
+        if open_df.empty:
+            st.caption("No open Jiras in the dataset.")
         else:
-            # Get every quarter that actually has rows in the filtered view,
-            # ordered by FY (year, quarter) using the existing sort key.
-            quarters_present = sorted(
-                df_jc_view["Quarter"].dropna().astype(str).str.strip().unique().tolist(),
-                key=quarter_sheet_sort_key,
-            )
+            # ─── Filters in expander ─────────────────────────────────
+            with st.expander("Refine view", expanded=False):
+                fcols = st.columns(2)
 
-            q_values = [int((df_jc_view["Quarter"] == q).sum()) for q in quarters_present]
-            # Display labels: "Q1_2026" → "Q1 2026". Falls back to the raw
-            # tag if the helper can't parse it (defensive — should never
-            # happen with well-formed sheet names but doesn't hurt).
-            q_labels = [sheet_to_quarter_label(q) or q for q in quarters_present]
+                # Customer filter (multi-select)
+                all_customers = sorted(
+                    open_df["Customer"].dropna().astype(str).str.strip()
+                    .replace("", pd.NA).dropna().unique().tolist()
+                )
+                with fcols[0]:
+                    sel_customers = st.multiselect(
+                        "Customers",
+                        all_customers,
+                        default=[],
+                        key="open_age_customers",
+                        help="Leave empty to show all customers.",
+                    )
 
-            # Color cycle: indigo, emerald, terracotta, honey — picks up
-            # additional palette entries as more quarters are added. We
-            # use the *_DEEP variants so each bar reads as a solid block.
-            quarter_palette = [
-                CHART_INDIGO_DEEP,
-                CHART_EMERALD_DEEP,
-                CHART_TERRACOTTA_DEEP,
-                CHART_HONEY_DEEP,
-                CHART_PLUM_DEEP,
-                CHART_STEEL_DEEP,
-            ]
-            q_colors = [quarter_palette[i % len(quarter_palette)] for i in range(len(quarters_present))]
+                # Priority filter (multi-select)
+                with fcols[1]:
+                    sel_priorities = st.multiselect(
+                        "Priorities",
+                        ["P1", "P2", "P3", "P4"],
+                        default=[],
+                        key="open_age_priorities",
+                        help="Leave empty to show all priorities.",
+                    )
 
-            # Bar widths scale slightly with the number of quarters so two
-            # bars don't look too narrow and six don't look too crowded.
-            bar_width = max(0.35, 0.7 - 0.05 * len(quarters_present))
+                # Status filter (multi-select from open statuses only)
+                open_statuses_in_data = sorted(open_df["Status"].dropna().unique().tolist())
+                sel_statuses = st.multiselect(
+                    "Status",
+                    open_statuses_in_data,
+                    default=[],
+                    key="open_age_statuses",
+                    help="Filter by specific open-state statuses (New, In Progress, etc.).",
+                )
 
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=q_labels,
-                y=q_values,
-                marker=dict(color=q_colors, line=dict(width=0)),
-                text=[f"<b>{v}</b>" for v in q_values],
-                textposition="outside",
-                textfont=dict(color=INK, size=16, family="Inter"),
-                hovertemplate="<b>%{x}</b><br>%{y} Jiras created<extra></extra>",
-                width=[bar_width] * len(quarters_present),
-                cliponaxis=False,
-            ))
-            fig.update_layout(
-                xaxis_title="",
-                yaxis_title="",
-                yaxis=dict(rangemode="tozero", visible=False),
-                xaxis=dict(tickfont=dict(color=INK, size=14, family="Inter")),
-                height=320,
-                showlegend=False,
-            )
-            chart_theme(fig)
-            st.plotly_chart(fig, use_container_width=True, key="reports_q_compare")
+                # ─── Date range query builder ───────────────────────
+                # Smart preset dropdown that handles 95% of cases, with
+                # an escape hatch to a custom range for power users.
+                # "Today" uses the real wall-clock today since that's
+                # what users expect from a date filter (vs the as-of
+                # date used for Age, which is data-driven).
+                st.markdown("**Creation Date range**")
+                real_today = pd.Timestamp.today().normalize()
 
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                date_range_options = [
+                    "All time",
+                    "Today",
+                    "Yesterday",
+                    "Last 7 days",
+                    "Last 30 days",
+                    "Last 90 days",
+                    "Last 6 months",
+                    "Year to date",
+                    "Custom range...",
+                ]
+                date_choice = st.selectbox(
+                    "Quick range",
+                    date_range_options,
+                    index=0,  # "All time" default
+                    key="open_age_date_range",
+                    label_visibility="collapsed",
+                )
 
-        # ─── Top customers (creation-based) ──────────────────────────────
-        section(f"Top customers by Jiras created · {year_label}")
+                # Compute the (from, to) date pair from the choice
+                if date_choice == "All time":
+                    date_from, date_to = None, None
+                elif date_choice == "Today":
+                    date_from = real_today
+                    date_to = real_today
+                elif date_choice == "Yesterday":
+                    date_from = real_today - pd.Timedelta(days=1)
+                    date_to = real_today - pd.Timedelta(days=1)
+                elif date_choice == "Last 7 days":
+                    date_from = real_today - pd.Timedelta(days=7)
+                    date_to = real_today
+                elif date_choice == "Last 30 days":
+                    date_from = real_today - pd.Timedelta(days=30)
+                    date_to = real_today
+                elif date_choice == "Last 90 days":
+                    date_from = real_today - pd.Timedelta(days=90)
+                    date_to = real_today
+                elif date_choice == "Last 6 months":
+                    date_from = real_today - pd.DateOffset(months=6)
+                    date_to = real_today
+                elif date_choice == "Year to date":
+                    date_from = pd.Timestamp(real_today.year, 1, 1)
+                    date_to = real_today
+                elif date_choice == "Custom range...":
+                    # Two manual date pickers
+                    dcols = st.columns(2)
+                    # Sensible defaults: last 30 days
+                    cust_default_from = real_today - pd.Timedelta(days=30)
+                    cust_default_to = real_today
+                    with dcols[0]:
+                        date_from = st.date_input(
+                            "From",
+                            value=cust_default_from.date(),
+                            key="open_age_custom_from",
+                        )
+                        date_from = pd.Timestamp(date_from)
+                    with dcols[1]:
+                        date_to = st.date_input(
+                            "To",
+                            value=cust_default_to.date(),
+                            key="open_age_custom_to",
+                        )
+                        date_to = pd.Timestamp(date_to)
+                else:
+                    date_from, date_to = None, None
 
-        if df_jc_view.empty or "Customer" not in df_jc_view.columns:
-            st.info("No customer data available.")
-        else:
-            cust_counts = (
-                df_jc_view["Customer"].dropna().astype(str).str.strip()
-                .replace("", pd.NA).dropna()
-                .value_counts().head(12).reset_index()
-            )
-            cust_counts.columns = ["Customer", "Count"]
+            # Apply all filters
+            filtered = open_df.copy()
+            if sel_customers:
+                filtered = filtered[filtered["Customer"].isin(sel_customers)]
+            if sel_priorities:
+                filtered = filtered[filtered["Priority"].isin(sel_priorities)]
+            if sel_statuses:
+                filtered = filtered[filtered["Status"].isin(sel_statuses)]
+            if date_from is not None:
+                filtered = filtered[filtered["Creation Date"] >= date_from]
+            if date_to is not None:
+                # Include the entire "to" day
+                filtered = filtered[filtered["Creation Date"] <= date_to + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
 
-            fig = go.Figure()
-            counts_list = cust_counts["Count"].tolist()
-            colors = bar_palette(counts_list, CHART_PLUM, CHART_PLUM_DEEP)
-            fig.add_trace(go.Bar(
-                x=counts_list,
-                y=cust_counts["Customer"].tolist(),
-                orientation="h",
-                marker=dict(color=colors, line=dict(width=0)),
-                text=[f"<b>{v}</b>" for v in counts_list],
-                textposition="outside",
-                textfont=dict(color=INK, size=12, family="Inter"),
-                hovertemplate="<b>%{y}</b><br>%{x} Jiras created<extra></extra>",
-                cliponaxis=False,
-            ))
-            fig.update_layout(
-                yaxis=dict(autorange="reversed"),
-                xaxis_title="",
-                yaxis_title="",
-                height=420,
-            )
-            chart_theme(fig)
-            st.plotly_chart(fig, use_container_width=True, key="reports_top_customers")
+            # Sort by Age descending (longest-running first)
+            filtered = filtered.sort_values("Age (days)", ascending=False).reset_index(drop=True)
 
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if filtered.empty:
+                st.info("No open Jiras match the selected filters. Try relaxing the filters above.")
+            else:
+                # ─── Pagination ──────────────────────────────────────
+                # 10 rows per page with Previous / Next buttons. Page state
+                # lives in session_state so it survives reruns. Auto-reset
+                # to page 1 when filters change (would require tracking
+                # filter state — for now users manually go back to page 1
+                # if they over-paginated; not worth the complexity yet).
+                PAGE_SIZE = 10
+                total_rows = len(filtered)
+                total_pages = (total_rows - 1) // PAGE_SIZE + 1
 
-        # ─── Top affected versions (creation-based) ──────────────────────
-        section(f"Top affected versions · {year_label}")
+                # Initialize / clamp page state
+                if "open_age_page" not in st.session_state:
+                    st.session_state.open_age_page = 1
+                # Clamp in case filter result shrunk below current page
+                if st.session_state.open_age_page > total_pages:
+                    st.session_state.open_age_page = 1
+                page = st.session_state.open_age_page
 
-        if df_jc_view.empty or "Affects Version" not in df_jc_view.columns:
-            st.info("No version data available.")
-        else:
-            version_counts = (
-                df_jc_view["Affects Version"].dropna().astype(str).str.strip()
-                .replace("", pd.NA).dropna()
-                .value_counts().head(8).reset_index()
-            )
-            version_counts.columns = ["Version", "Count"]
+                start_idx = (page - 1) * PAGE_SIZE
+                end_idx = start_idx + PAGE_SIZE
+                page_slice = filtered.iloc[start_idx:end_idx].copy()
 
-            fig = go.Figure()
-            counts_list = version_counts["Count"].tolist()
-            colors = bar_palette(counts_list, CHART_HONEY, CHART_HONEY_DEEP)
-            fig.add_trace(go.Bar(
-                x=version_counts["Version"].tolist(),
-                y=counts_list,
-                marker=dict(color=colors, line=dict(width=0)),
-                text=[f"<b>{v}</b>" for v in counts_list],
-                textposition="outside",
-                textfont=dict(color=INK, size=12, family="Inter"),
-                hovertemplate="<b>%{x}</b><br>%{y} Jiras<extra></extra>",
-                cliponaxis=False,
-            ))
-            fig.update_layout(
-                xaxis_title="",
-                yaxis_title="",
-                yaxis=dict(rangemode="tozero"),
-                height=360,
-                showlegend=False,
-            )
-            chart_theme(fig)
-            st.plotly_chart(fig, use_container_width=True, key="reports_top_versions")
+                # Build display columns with clickable Jira link
+                JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
+                page_slice["Jira Link"] = page_slice["Issue Key"].apply(
+                    lambda k: f"{JIRA_BASE_URL}{k}"
+                )
+                page_slice["Created"] = page_slice["Creation Date"].dt.strftime("%Y-%m-%d")
 
-        # Footnote explaining the data source
-        st.markdown(
-            f'<div style="font-family:Inter,sans-serif;font-size:0.82rem;color:{MUTED};'
-            f'background:rgba(124,111,232,0.05);border-left:3px solid {CHART_INDIGO};'
-            f'padding:14px 18px;border-radius:6px;margin:32px 0 12px 0;line-height:1.6;">'
-            f'<b style="color:{INK}">Note:</b> This tab uses the <code>JIRA_Created</code> sheet, '
-            f'which tracks every Jira <b>raised</b> in each quarter (regardless of whether it has been resolved). '
-            f'This is different from the rest of the dashboard, which is based on resolved Jiras only. '
-            f'The reporting-period dropdown in the sidebar does not affect this view.'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+                show_cols = ["Issue Key", "Customer", "Priority", "Status", "Created", "Age (days)", "Jira Link"]
+                show_cols = [c for c in show_cols if c in page_slice.columns]
 
+                st.dataframe(
+                    page_slice[show_cols],
+                    use_container_width=True,
+                    height=400,
+                    column_config={
+                        "Jira Link": st.column_config.LinkColumn(
+                            "Open in Jira",
+                            display_text="🔗 View",
+                        ),
+                        "Age (days)": st.column_config.NumberColumn(
+                            "Age (days)",
+                            help=f"Days since creation, computed against {asof_date.date()} (latest known activity in the dataset).",
+                            format="%d days",
+                        ),
+                    },
+                    hide_index=True,
+                )
 
-    # Stop here — none of the main dashboard renders in Reports view.
+                # Pagination controls
+                pcols = st.columns([1, 2, 1])
+                with pcols[0]:
+                    if st.button("← Previous", key="open_age_prev", disabled=(page <= 1), use_container_width=True):
+                        st.session_state.open_age_page = max(1, page - 1)
+                        st.rerun()
+                with pcols[1]:
+                    st.markdown(
+                        f'<div style="text-align:center;font-family:Inter,sans-serif;'
+                        f'font-size:0.9rem;color:{SUBTEXT};padding:8px 0;">'
+                        f'Page <b style="color:{INK}">{page}</b> of {total_pages} · '
+                        f'<b style="color:{INK}">{total_rows}</b> open Jira(s) match the filters'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                with pcols[2]:
+                    if st.button("Next →", key="open_age_next", disabled=(page >= total_pages), use_container_width=True):
+                        st.session_state.open_age_page = min(total_pages, page + 1)
+                        st.rerun()
+
+                st.caption(
+                    f"Showing rows {start_idx + 1}–{min(end_idx, total_rows)} of {total_rows} · "
+                    f"Age computed as days since Creation Date, anchored to {asof_date.date()}."
+                )
+
+    # Stop here — none of the main dashboard renders in Created Jiras view.
     st.stop()
 
 
@@ -1696,7 +1788,7 @@ with kpi_cols[4]:
     st.markdown(kpi_caption(safe_pct(rfh_count, total_issues)), unsafe_allow_html=True)
 
 # -- Tabs ---------------------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Snapshot", "Quality", "Team", "Data explorer", "How we calculate"])
+tab1, tab2, tab3, tab_customer, tab4, tab5 = st.tabs(["Snapshot", "Quality", "Team", "Customers", "Data explorer", "How we calculate"])
 
 # -- TAB 1: Overview ----------------------------------------------------------
 with tab1:
@@ -2062,78 +2154,74 @@ with tab1:
             chart_theme(fig)
             st.plotly_chart(fig, use_container_width=True, key="chart_06_volume")
 
-    # ─── Top customers (new section, full-width row) ─────────────────────
-    # Uses the JIRA_Created sheet (separate dataset from the quarter sheets).
-    # That sheet contains every Jira created in the period along with which
-    # Customer raised it. Question this answers: "Which customers are raising
-    # the most P2E Jiras?" — useful for account prioritization conversations.
-    if df_jira_created is not None and not df_jira_created.empty and "Customer" in df_jira_created.columns:
-        section("Top customers by JIRA volume")
+    # ─── Top 10 longest-running Jiras (resolution-based) ─────────────────
+    # A spotlight view of the 10 P2E Jiras that took the longest to resolve
+    # within the selected period. Resolution-based by design (matches the
+    # rest of the Snapshot tab); respects the period filter. No local
+    # filters — this is meant as a quick "what hurt us this period" view
+    # for leadership scanning. The Customers tab has the filter-capable
+    # version with open + closed mixed.
+    #
+    # Data source: df (period-filtered quarter-sheet data). Every row here
+    # has a Resolution Date because that's how the quarter sheets are scoped.
+    if not df.empty and "Creation Date" in df.columns and "Resolution Date" in df.columns:
+        section("Top 10 longest-running Jiras")
 
-        # Apply the same period filter to the customer dataset so the chart
-        # matches the rest of the page. JIRA_Created has a Quarter column
-        # (Q1_2026 / Q2_2026 / etc.) that's structurally identical to the
-        # Source Sheet column on the issue dataset — we map it to the same
-        # display label and reuse apply_reporting_period.
-        df_jc = df_jira_created.copy()
-        if "Quarter" in df_jc.columns:
-            df_jc["Source Sheet"] = df_jc["Quarter"].astype(str).str.strip()
-            df_jc["Quarter Label"] = df_jc["Source Sheet"].map(sheet_to_quarter_label)
+        # Compute days to resolve. Negative or null days get filtered out
+        # because they indicate data issues we can't draw conclusions from.
+        lr = df.copy()
+        lr["Creation Date"] = pd.to_datetime(lr["Creation Date"], errors="coerce")
+        lr["Resolution Date"] = pd.to_datetime(lr["Resolution Date"], errors="coerce")
+        lr["Days to Resolve"] = (lr["Resolution Date"] - lr["Creation Date"]).dt.days
+        lr = lr[lr["Days to Resolve"].notna() & (lr["Days to Resolve"] >= 0)]
 
-        try:
-            df_jc_period = apply_reporting_period(df_jc, reporting_period, period_map)
-        except Exception:
-            # If for any reason the period filter doesn't match the JIRA_Created
-            # dataset, fall back to showing all of it rather than crashing.
-            df_jc_period = df_jc
-
-        if df_jc_period.empty:
-            st.caption("No customer data available for the selected period.")
+        if lr.empty:
+            st.caption("No Jiras in the current period have valid date data for this calculation.")
         else:
-            # Top 12 customers by Jira count
-            customer_counts = (
-                df_jc_period["Customer"]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .replace("", pd.NA)
-                .dropna()
-                .value_counts()
-                .head(12)
-                .reset_index()
-            )
-            customer_counts.columns = ["Customer", "Count"]
+            # Sort by Days to Resolve descending, take top 10
+            lr = lr.sort_values("Days to Resolve", ascending=False).head(10)
 
-            # Horizontal bar chart in the indigo gradient — matches the
-            # Engineer chart on the Team tab so they read as siblings.
-            fig = go.Figure()
-            counts_list = customer_counts["Count"].tolist()
-            colors = bar_palette(counts_list, CHART_PLUM, CHART_PLUM_DEEP)
-
-            fig.add_trace(go.Bar(
-                x=counts_list,
-                y=customer_counts["Customer"].tolist(),
-                orientation="h",
-                marker=dict(color=colors, line=dict(width=0)),
-                text=[f"<b>{v}</b>" for v in counts_list],
-                textposition="outside",
-                textfont=dict(color=INK, size=12, family="Inter"),
-                hovertemplate="<b>%{y}</b><br>%{x} jiras created<extra></extra>",
-                cliponaxis=False,
-            ))
-            fig.update_layout(
-                yaxis=dict(autorange="reversed"),
-                xaxis_title="",
-                yaxis_title="",
-                height=420,
+            # Build the display frame with a clickable Jira link
+            JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
+            display_lr = lr.copy()
+            display_lr["Jira Link"] = display_lr["Issue Key"].apply(
+                lambda k: f"{JIRA_BASE_URL}{k}"
             )
-            chart_theme(fig)
-            st.plotly_chart(fig, use_container_width=True, key="chart_07_top_customers")
+            display_lr["Created"] = display_lr["Creation Date"].dt.strftime("%Y-%m-%d")
+            display_lr["Resolved"] = display_lr["Resolution Date"].dt.strftime("%Y-%m-%d")
+
+            # Use Priority_Short if it exists (cleaner), otherwise raw Priority
+            priority_col = "Priority_Short" if "Priority_Short" in display_lr.columns else "Priority"
+
+            # Select the columns we want in the order they should appear
+            show_cols = ["Issue Key", "Customer", priority_col, "Created", "Resolved", "Days to Resolve", "Jira Link"]
+            show_cols = [c for c in show_cols if c in display_lr.columns]
+
+            # Rename Priority_Short → Priority for display
+            display_df = display_lr[show_cols].rename(columns={"Priority_Short": "Priority"})
+
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                height=400,
+                column_config={
+                    "Jira Link": st.column_config.LinkColumn(
+                        "Open in Jira",
+                        display_text="🔗 View",
+                    ),
+                    "Days to Resolve": st.column_config.NumberColumn(
+                        "Days to Resolve",
+                        help="Time between Creation Date and Resolution Date.",
+                        format="%d days",
+                    ),
+                },
+                hide_index=True,
+            )
 
             st.caption(
-                f"Showing top {len(customer_counts)} customers · "
-                f"{int(df_jc_period['Customer'].notna().sum()):,} total Jiras created in this period · "
-                f"data from the JIRA_Created sheet (separate from the resolved-issues view above)."
+                f"Showing the 10 longest-running Jiras in the selected period · "
+                f"sorted by days from Creation Date to Resolution Date · "
+                f"resolution-based (matches the rest of this tab)."
             )
 
 # -- TAB 2: Quality -----------------------------------------------------------
@@ -2676,6 +2764,447 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# -- TAB: Customers -----------------------------------------------------------
+# Customer-centric view requested by leadership. Four charts that answer the
+# director's recurring questions:
+#   1. Top customers — who's raising the most issues (lens-aware)
+#   2. Priority breakdown per customer — how many P1s/P2s per customer
+#   3. Resolution time by priority — are P1s getting faster service than P4s
+#   4. Longest-running Jiras table — what's currently demanding attention
+#
+# Data source depends on the active lens:
+#   • Resolved lens → df_source (the 371 P2E quarter-sheet rows)
+#   • Created lens → df_jira_created (the 441 created Jiras)
+# We pick the right source at the top of the tab to keep downstream code clean.
+with tab_customer:
+    # Choose the right dataset based on the active lens
+    # Note: is_reports_view is the existing boolean from the view picker
+    if is_reports_view:
+        customer_df = df_jira_created.copy() if df_jira_created is not None else pd.DataFrame()
+        lens_label = "Created Jiras"
+        date_col = "Creation Date"
+    else:
+        customer_df = df.copy()  # df = period-filtered resolved data
+        lens_label = "Resolved Jiras"
+        date_col = "Resolution Date"
+
+    if customer_df.empty or "Customer" not in customer_df.columns:
+        st.warning(
+            f"No customer data available for the {lens_label} view. "
+            f"This view requires a Customer column on the underlying data."
+        )
+    else:
+        # ─── Chart 1: Top customers ────────────────────────────────────
+        # The classic "who is filing the most Jiras" chart. Lens-aware so
+        # leadership can flip between resolution-based and creation-based
+        # rankings without losing visual context.
+        section(f"Top customers · {lens_label}")
+
+        top_customers = (
+            customer_df["Customer"]
+            .dropna()
+            .astype(str).str.strip()
+            .replace("", pd.NA).dropna()
+            .value_counts()
+            .head(12)
+            .reset_index()
+        )
+        top_customers.columns = ["Customer", "Count"]
+
+        if not top_customers.empty:
+            fig = go.Figure()
+            counts_list = top_customers["Count"].tolist()
+            colors = bar_palette(counts_list, CHART_PLUM, CHART_PLUM_DEEP)
+
+            fig.add_trace(go.Bar(
+                x=counts_list,
+                y=top_customers["Customer"].tolist(),
+                orientation="h",
+                marker=dict(color=colors, line=dict(width=0)),
+                text=[f"<b>{v}</b>" for v in counts_list],
+                textposition="outside",
+                textfont=dict(color=INK, size=12, family="Inter"),
+                hovertemplate="<b>%{y}</b><br>%{x} jiras<extra></extra>",
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="",
+                yaxis_title="",
+                height=420,
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="cust_top_customers")
+
+            verb = "raised" if is_reports_view else "resolved"
+            st.caption(
+                f"Showing top {len(top_customers)} customers by Jiras {verb} · "
+                f"{int(customer_df['Customer'].notna().sum()):,} total Jiras have a customer tagged."
+            )
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ─── Chart 2: Priority breakdown per customer ──────────────────
+        # Director's stated ask: "how many P1s/P2s per customer." Stacked
+        # horizontal bar with priority-colored segments. Filters live in
+        # an expander to keep the default view clean.
+        section(f"Priority breakdown per customer · {lens_label}")
+
+        if "Priority" not in customer_df.columns and "Priority_Short" not in customer_df.columns:
+            st.info("Priority data is not available on this dataset.")
+        else:
+            # Get short priority codes — JIRA_Created has Priority as P1/P2/P3/P4 directly,
+            # quarter sheets have long descriptions that need shortening.
+            if "Priority_Short" in customer_df.columns:
+                customer_df["_pri"] = customer_df["Priority_Short"]
+            else:
+                def _sp(p):
+                    if pd.isna(p): return None
+                    s = str(p).strip()
+                    m = re.match(r"^(P[0-9])\b", s, re.IGNORECASE)
+                    return m.group(1).upper() if m else s
+                customer_df["_pri"] = customer_df["Priority"].map(_sp)
+
+            # ─── Filters in expander ─────────────────────────────────
+            with st.expander("Refine view", expanded=False):
+                fcols = st.columns(3)
+
+                # Filter 1: Customer multi-select (default = top 10 by volume)
+                all_customers = sorted(
+                    customer_df["Customer"].dropna().astype(str).str.strip()
+                    .replace("", pd.NA).dropna().unique().tolist()
+                )
+                default_customers = top_customers.head(10)["Customer"].tolist()
+                with fcols[0]:
+                    sel_customers = st.multiselect(
+                        "Customers",
+                        all_customers,
+                        default=default_customers,
+                        key="cust_priority_customers",
+                        help="Pick specific customers to focus on. Defaults to top 10 by volume.",
+                    )
+
+                # Filter 2: Priority multi-select
+                priority_options = ["P1", "P2", "P3", "P4"]
+                with fcols[1]:
+                    sel_priorities = st.multiselect(
+                        "Priorities",
+                        priority_options,
+                        default=priority_options,
+                        key="cust_priority_priorities",
+                        help="Limit to specific priority levels.",
+                    )
+
+                # Filter 3: Type of Request (only meaningful when column exists)
+                with fcols[2]:
+                    if "Type of Request" in customer_df.columns:
+                        type_options = ["Bug", "Request for Help"]
+                        sel_types = st.multiselect(
+                            "Type of Request",
+                            type_options,
+                            default=type_options,
+                            key="cust_priority_types",
+                            help="Filter by Bug vs Request for Help.",
+                        )
+                    else:
+                        st.caption("Type of Request not available on this dataset")
+                        sel_types = None
+
+            # Apply filters
+            chart_df = customer_df.copy()
+            if sel_customers:
+                chart_df = chart_df[chart_df["Customer"].isin(sel_customers)]
+            if sel_priorities:
+                chart_df = chart_df[chart_df["_pri"].isin(sel_priorities)]
+            if sel_types is not None and sel_types and "Type of Request" in chart_df.columns:
+                chart_df = chart_df[chart_df["Type of Request"].isin(sel_types)]
+
+            if chart_df.empty:
+                st.info("No data matches the selected filters. Adjust the filters above.")
+            else:
+                # Build cross-tab: customer × priority
+                ct = pd.crosstab(chart_df["Customer"], chart_df["_pri"])
+                # Order customers by total volume (descending)
+                ct["__total"] = ct.sum(axis=1)
+                ct = ct.sort_values("__total", ascending=False).head(10).drop(columns="__total")
+
+                # Stacked horizontal bar — one trace per priority
+                priority_colors = {
+                    "P1": CHART_TERRACOTTA_DEEP,   # critical = red
+                    "P2": CHART_INDIGO_DEEP,        # high = indigo
+                    "P3": CHART_STEEL,              # medium = steel
+                    "P4": CHART_PLUM,               # low = plum
+                }
+
+                fig = go.Figure()
+                for pri in ["P1", "P2", "P3", "P4"]:
+                    if pri not in ct.columns:
+                        continue
+                    fig.add_trace(go.Bar(
+                        x=ct[pri].tolist(),
+                        y=ct.index.tolist(),
+                        name=pri,
+                        orientation="h",
+                        marker=dict(color=priority_colors.get(pri, MUTED), line=dict(width=0)),
+                        hovertemplate=f"<b>%{{y}}</b><br>{pri}: %{{x}}<extra></extra>",
+                    ))
+                fig.update_layout(
+                    barmode="stack",
+                    yaxis=dict(autorange="reversed"),
+                    xaxis_title="",
+                    yaxis_title="",
+                    height=460,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                chart_theme(fig)
+                st.plotly_chart(fig, use_container_width=True, key="cust_priority_breakdown")
+
+                st.caption(
+                    f"Each bar represents one customer; segments show priority distribution. "
+                    f"{len(ct)} customer(s) shown · {int(ct.values.sum())} Jiras total in the filtered view."
+                )
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ─── Chart 3: Resolution time by priority ──────────────────────
+        # Surfaces whether P1s actually get faster service than P4s.
+        # Only meaningful on Resolved lens (open Jiras have no resolution time).
+        section(f"Resolution time by priority · {lens_label}")
+
+        if is_reports_view:
+            # Created lens: show banner explaining this chart applies to closed work only
+            closed_subset = customer_df[customer_df["Resolution Date"].notna()].copy()
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif;font-size:0.85rem;color:{SUBTEXT};'
+                f'background:rgba(124,111,232,0.05);border-left:3px solid {CHART_INDIGO};'
+                f'padding:12px 16px;border-radius:6px;margin:0 0 16px 0;">'
+                f'Resolution time applies to closed Jiras only. Showing the {len(closed_subset)} '
+                f'resolved subset of {len(customer_df)} created Jiras.'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            rt_df = closed_subset
+        else:
+            rt_df = customer_df.copy()
+
+        # Need both dates to compute days-to-resolve
+        if "Creation Date" not in rt_df.columns or "Resolution Date" not in rt_df.columns:
+            st.info("Resolution time requires both Creation Date and Resolution Date columns.")
+        else:
+            rt_df["Creation Date"] = pd.to_datetime(rt_df["Creation Date"], errors="coerce")
+            rt_df["Resolution Date"] = pd.to_datetime(rt_df["Resolution Date"], errors="coerce")
+            rt_df["_days"] = (rt_df["Resolution Date"] - rt_df["Creation Date"]).dt.days
+            rt_df = rt_df[rt_df["_days"].notna() & (rt_df["_days"] >= 0)]
+
+            # Compute Priority_Short if not present
+            if "_pri" not in rt_df.columns:
+                if "Priority_Short" in rt_df.columns:
+                    rt_df["_pri"] = rt_df["Priority_Short"]
+                else:
+                    def _sp(p):
+                        if pd.isna(p): return None
+                        s = str(p).strip()
+                        m = re.match(r"^(P[0-9])\b", s, re.IGNORECASE)
+                        return m.group(1).upper() if m else s
+                    rt_df["_pri"] = rt_df["Priority"].map(_sp)
+
+            agg = rt_df.groupby("_pri")["_days"].agg(["median", "mean", "count"]).reset_index()
+            agg = agg[agg["_pri"].isin(["P1", "P2", "P3", "P4"])]
+            agg = agg.sort_values("_pri")
+
+            if agg.empty:
+                st.info("Not enough data to compute resolution time by priority.")
+            else:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=agg["_pri"].tolist(),
+                    y=agg["median"].tolist(),
+                    name="Median days",
+                    marker=dict(color=CHART_EMERALD_DEEP, line=dict(width=0)),
+                    text=[f"<b>{int(v)}</b>" for v in agg["median"].tolist()],
+                    textposition="outside",
+                    textfont=dict(color=INK, size=12, family="Inter"),
+                    hovertemplate="<b>%{x}</b><br>Median: %{y:.1f} days<extra></extra>",
+                ))
+                fig.add_trace(go.Bar(
+                    x=agg["_pri"].tolist(),
+                    y=agg["mean"].tolist(),
+                    name="Mean days",
+                    marker=dict(color=CHART_STEEL, line=dict(width=0)),
+                    text=[f"<b>{int(v)}</b>" for v in agg["mean"].tolist()],
+                    textposition="outside",
+                    textfont=dict(color=INK, size=12, family="Inter"),
+                    hovertemplate="<b>%{x}</b><br>Mean: %{y:.1f} days<extra></extra>",
+                ))
+                fig.update_layout(
+                    barmode="group",
+                    xaxis_title="",
+                    yaxis_title="Days",
+                    height=360,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                chart_theme(fig)
+                st.plotly_chart(fig, use_container_width=True, key="cust_restime_by_priority")
+
+                count_text = " · ".join(f"{r['_pri']}: {int(r['count'])} jiras" for _, r in agg.iterrows())
+                st.caption(count_text)
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ─── Chart 4: Longest-running Jiras table ─────────────────────
+        # Director's "drill into specifics" view. Shows the top N
+        # longest-running Jiras with full metadata. Filters let user
+        # narrow by customer, status, and priority.
+        section(f"Longest-running Jiras · {lens_label}")
+
+        # The data source for this chart depends on the active lens:
+        #   • Resolved lens → only Jiras with a Resolution Date (truly resolved)
+        #   • Created lens → all of JIRA_Created (includes open + closed)
+        # The local Status filter then operates within that already-scoped set.
+        # Using JIRA_Created as the base for both (it has open + closed) and
+        # filtering by Resolution Date for Resolved lens keeps the table
+        # consistent with the rest of the lens's mental model.
+        if df_jira_created is not None and not df_jira_created.empty and "Creation Date" in df_jira_created.columns:
+            lr_df = df_jira_created.copy()
+            lr_df["Creation Date"] = pd.to_datetime(lr_df["Creation Date"], errors="coerce")
+            if "Resolution Date" in lr_df.columns:
+                lr_df["Resolution Date"] = pd.to_datetime(lr_df["Resolution Date"], errors="coerce")
+            else:
+                lr_df["Resolution Date"] = pd.NaT
+
+            # ─── Apply lens scope ────────────────────────────────────
+            # On Resolved lens, restrict to Jiras that actually have a
+            # Resolution Date. This prevents open Jiras (Status=New etc.)
+            # from leaking into a view that's contextually about resolved
+            # work. On Created lens, keep all rows so open backlog is visible.
+            if not is_reports_view:
+                lr_df = lr_df[lr_df["Resolution Date"].notna()].copy()
+
+            # "As-of" date = max Resolution Date in dataset (per your earlier decision)
+            asof_candidates = [
+                lr_df["Resolution Date"].max(),
+                lr_df["Creation Date"].max(),
+                pd.Timestamp.today(),
+            ]
+            asof_date = next((d for d in asof_candidates if pd.notna(d)), pd.Timestamp.today())
+            # Use last day of as-of month to keep numbers stable
+            asof_date = pd.Timestamp(asof_date).normalize()
+
+            # Compute days open: for closed Jiras = (resolution - creation), for open = (asof - creation)
+            lr_df["_end_date"] = lr_df["Resolution Date"].fillna(asof_date)
+            lr_df["Days Open"] = (lr_df["_end_date"] - lr_df["Creation Date"]).dt.days
+            lr_df = lr_df[lr_df["Days Open"].notna() & (lr_df["Days Open"] >= 0)]
+
+            # ─── Filters ──────────────────────────────────────────
+            with st.expander("Refine view", expanded=False):
+                lcols = st.columns(3)
+
+                # Customer filter
+                lr_customers = sorted(
+                    lr_df["Customer"].dropna().astype(str).str.strip()
+                    .replace("", pd.NA).dropna().unique().tolist()
+                ) if "Customer" in lr_df.columns else []
+                with lcols[0]:
+                    lr_sel_customers = st.multiselect(
+                        "Customers",
+                        lr_customers,
+                        default=[],
+                        key="lr_customers",
+                        help="Leave empty to show all customers.",
+                    )
+
+                # Status filter — lens-aware options
+                with lcols[1]:
+                    if is_reports_view:
+                        # Created lens: All / Open / Closed
+                        status_choice = st.selectbox(
+                            "Status",
+                            ["All", "Open", "Closed"],
+                            index=0,
+                            key="lr_status",
+                            help="Open = Status not Resolved/Closed. Closed = Resolved or Closed.",
+                        )
+                    else:
+                        # Resolved lens: All / Resolved / Closed
+                        status_choice = st.selectbox(
+                            "Status",
+                            ["All", "Resolved", "Closed"],
+                            index=0,
+                            key="lr_status",
+                            help="Filter by terminal status.",
+                        )
+
+                # Priority filter (default P1)
+                with lcols[2]:
+                    lr_sel_priorities = st.multiselect(
+                        "Priorities",
+                        ["P1", "P2", "P3", "P4"],
+                        default=["P1"],
+                        key="lr_priorities",
+                        help="Default shows P1 only. Pick more to expand.",
+                    )
+
+            # Apply filters
+            if lr_sel_customers:
+                lr_df = lr_df[lr_df["Customer"].isin(lr_sel_customers)]
+            if status_choice == "Open":
+                lr_df = lr_df[~lr_df["Status"].isin(["Resolved", "Closed"])]
+            elif status_choice == "Resolved":
+                lr_df = lr_df[lr_df["Status"] == "Resolved"]
+            elif status_choice == "Closed":
+                lr_df = lr_df[lr_df["Status"] == "Closed"]
+            if lr_sel_priorities:
+                # Priority in JIRA_Created is already short (P1/P2/etc.)
+                lr_df = lr_df[lr_df["Priority"].isin(lr_sel_priorities)]
+
+            # Sort by Days Open descending, take top 15
+            lr_df = lr_df.sort_values("Days Open", ascending=False).head(15)
+
+            if lr_df.empty:
+                st.info("No Jiras match the selected filters. Try relaxing the filters above.")
+            else:
+                # Build display columns + clickable Jira link
+                JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
+
+                # Format dates as strings for display
+                display_df = lr_df.copy()
+                display_df["Jira Link"] = display_df["Issue Key"].apply(
+                    lambda k: f"{JIRA_BASE_URL}{k}"
+                )
+                display_df["Created"] = display_df["Creation Date"].dt.strftime("%Y-%m-%d")
+                display_df["Resolved"] = display_df["Resolution Date"].apply(
+                    lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "—"
+                )
+
+                show_cols = ["Issue Key", "Customer", "Priority", "Status", "Created", "Resolved", "Days Open", "Jira Link"]
+                show_cols = [c for c in show_cols if c in display_df.columns]
+
+                st.dataframe(
+                    display_df[show_cols],
+                    use_container_width=True,
+                    height=500,
+                    column_config={
+                        "Jira Link": st.column_config.LinkColumn(
+                            "Open in Jira",
+                            display_text="🔗 View",
+                        ),
+                        "Days Open": st.column_config.NumberColumn(
+                            "Days Open",
+                            help="Time between Creation Date and Resolution Date (or 'as-of' date for open Jiras).",
+                            format="%d days",
+                        ),
+                    },
+                    hide_index=True,
+                )
+
+                st.caption(
+                    f"Showing top {len(display_df)} of filtered Jiras by Days Open · "
+                    f"Data as of {asof_date.date()} · "
+                    f"For open Jiras, 'Days Open' uses the as-of date as the endpoint."
+                )
+        else:
+            st.info("JIRA_Created sheet is required for the longest-running Jiras table.")
+
 # -- TAB 4: Data explorer -----------------------------------------------------
 with tab4:
     # Single tool — Custom export builder. (Filtered issues table was removed
@@ -2828,6 +3357,11 @@ with tab4:
     # Detect a date column by dtype rather than name so this works for any
     # future date columns the data team adds.
     DATE_OPERATORS = ["on", "on or after", "on or before", "between"]
+    # Labels column gets its own operator set since it's list-valued (each
+    # cell is a Python list as string like "['Endava', 'P2EminingReviewed']").
+    #   • "has any of"  → row matches if it has at least one of the picked labels (OR)
+    #   • "has none of" → row matches if it has NONE of the picked labels (NOT)
+    LABEL_OPERATORS = ["has any of", "has none of"]
 
     def is_date_column(frame: pd.DataFrame, column: str) -> bool:
         """True if the column has a datetime dtype (after parse_date_columns).
@@ -2838,6 +3372,58 @@ with tab4:
             return pd.api.types.is_datetime64_any_dtype(frame[column])
         except Exception:
             return False
+
+    def is_labels_column(column: str) -> bool:
+        """True if the column is the Labels column (which contains list-as-string
+        values like "['Endava', 'P2EminingReviewed']"). Gates the labels-specific
+        operator set + searchable multi-select value picker."""
+        return column.strip().lower() == "labels"
+
+    def parse_labels_cell(val) -> list:
+        """Parse a single Labels cell ('["Endava", "Cust-MSFT"]') into a Python list.
+        Handles edge cases: empty list strings, NaN, malformed values."""
+        if pd.isna(val):
+            return []
+        s = str(val).strip()
+        if not s or s == "[]":
+            return []
+        try:
+            import ast as _ast
+            parsed = _ast.literal_eval(s)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+            return []
+        except Exception:
+            return []
+
+    def build_labels_options(frame: pd.DataFrame, column: str) -> list:
+        """Return a sorted list of unique labels with their occurrence counts,
+        formatted as 'Label (N)' for the multi-select. Sorted by count desc
+        so the most common labels appear first. We keep the display format
+        consistent for both selection and re-display when rebuilding the UI."""
+        if column not in frame.columns:
+            return []
+        counter = {}
+        for val in frame[column].dropna():
+            for lbl in parse_labels_cell(val):
+                counter[lbl] = counter.get(lbl, 0) + 1
+        if not counter:
+            return []
+        # Sort by count desc, then alphabetical for ties
+        sorted_items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+        return [f"{lbl} ({cnt})" for lbl, cnt in sorted_items]
+
+    def strip_count_suffix(label_with_count: str) -> str:
+        """Reverse the 'Label (N)' formatting to get back the raw label name.
+        Used when applying the filter — we match against raw labels, not display strings."""
+        if not label_with_count:
+            return ""
+        s = str(label_with_count)
+        # Strip trailing " (N)" if present
+        m = re.search(r"\s*\(\d+\)\s*$", s)
+        if m:
+            return s[:m.start()].strip()
+        return s.strip()
 
     for i, flt in enumerate(st.session_state.explorer_filters):
         row_cols = st.columns([0.6, 2.2, 1.5, 3, 0.8])
@@ -2871,9 +3457,17 @@ with tab4:
             )
             flt["column"] = col_choice
 
-        # Switch operator + value widgets based on whether the column is a date.
+        # Switch operator + value widgets based on the column type.
+        # Three regimes: date column → DATE_OPERATORS, Labels column →
+        # LABEL_OPERATORS, anything else → standard text OPERATORS.
         col_is_date = is_date_column(df, col_choice)
-        operators_for_col = DATE_OPERATORS if col_is_date else OPERATORS
+        col_is_labels = is_labels_column(col_choice)
+        if col_is_date:
+            operators_for_col = DATE_OPERATORS
+        elif col_is_labels:
+            operators_for_col = LABEL_OPERATORS
+        else:
+            operators_for_col = OPERATORS
 
         # Operator picker
         with row_cols[2]:
@@ -2964,6 +3558,32 @@ with tab4:
                         key=f"flt_val_date_{i}",
                         label_visibility="collapsed",
                     )
+            elif col_is_labels:
+                # Labels column → searchable multi-select of labels with counts.
+                # Streamlit's st.multiselect supports type-to-search natively:
+                # user types "end" and the dropdown filters to matching labels.
+                # Display format is "Label (N)" so users see which spellings
+                # are common vs rare. We strip the count when applying the filter.
+                label_opts = build_labels_options(df, col_choice)
+                if not label_opts:
+                    st.caption("No labels found in the data.")
+                    val = []
+                else:
+                    prev_val = flt.get("value")
+                    # Persist previous selection across reruns when the options
+                    # still contain them (defensive against data reloads).
+                    if isinstance(prev_val, (list, tuple)):
+                        default_selection = [v for v in prev_val if v in label_opts]
+                    else:
+                        default_selection = []
+                    val = st.multiselect(
+                        "Labels",
+                        label_opts,
+                        default=default_selection,
+                        key=f"flt_val_labels_{i}",
+                        label_visibility="collapsed",
+                        placeholder="Type to search labels…",
+                    )
             elif op_choice in ("is", "is not"):
                 opts = build_options(df, col_choice)
                 if not opts:
@@ -3036,6 +3656,30 @@ with tab4:
                 return all_true
             return all_true
 
+        # Labels branch — runs when the column is Labels and the operator
+        # is one of the label operators. Labels cells are list-as-string
+        # ("['Endava', 'Cust-MSFT']") so we parse each row into a Python set
+        # and check intersection with the user's selected labels (count
+        # suffixes stripped first).
+        if op in ("has any of", "has none of") and is_labels_column(column):
+            if not isinstance(value, (list, tuple)) or not value:
+                # No labels selected → don't filter anything (all rows pass)
+                return all_true
+            # Strip "(N)" suffix to recover the raw label name for matching
+            selected_raw = {strip_count_suffix(v).lower() for v in value if v}
+            if not selected_raw:
+                return all_true
+
+            def _row_has_any(cell_val):
+                row_labels_lower = {lbl.lower() for lbl in parse_labels_cell(cell_val)}
+                return bool(row_labels_lower & selected_raw)
+
+            row_matches = frame[column].map(_row_has_any)
+            if op == "has any of":
+                return row_matches
+            else:  # "has none of"
+                return ~row_matches
+
         # Text branch (existing logic)
         if value == "":
             return all_true
@@ -3082,11 +3726,23 @@ with tab4:
 
     # Active filters badge strip — visual confirmation of what's applied
     if active_filters:
-        # Helper to render the value side of each badge. Date tuples (from
-        # the "between" operator) need to be unpacked into "YYYY-MM-DD to
-        # YYYY-MM-DD" — otherwise Python's default tuple repr leaks through.
+        # Helper to render the value side of each badge. Handles three cases:
+        #   • Date range tuple (2 dates) → "2026-04-01 to 2026-04-30"
+        #   • Labels multi-select (list of "Label (N)" strings) → "Endava, Cust-MSFT"
+        #   • Single date → "2026-04-15"
+        #   • Anything else → string repr
         def format_badge_value(value):
-            if isinstance(value, (list, tuple)) and len(value) == 2:
+            # Labels-style list — when multiple values are selected, show
+            # them comma-separated with the count suffixes stripped for readability
+            if isinstance(value, list) and len(value) >= 1:
+                # Check if these look like labels (strip count suffix and join)
+                stripped = [strip_count_suffix(v) for v in value]
+                if len(stripped) <= 3:
+                    return ", ".join(stripped)
+                # Too many to show in a badge — abbreviate
+                return f"{', '.join(stripped[:2])} +{len(stripped) - 2} more"
+            # Date range (2 dates)
+            if isinstance(value, tuple) and len(value) == 2:
                 try:
                     a = pd.to_datetime(value[0]).strftime("%Y-%m-%d")
                     b = pd.to_datetime(value[1]).strftime("%Y-%m-%d")
@@ -3172,8 +3828,45 @@ with tab4:
     if not chosen_export_cols:
         chosen_export_cols = available_export_cols
 
-    # Preview
-    st.dataframe(export_df[chosen_export_cols], use_container_width=True, height=380)
+    # Preview table.
+    # If the user selected "Issue Key" (or its display variant) as one of
+    # the export columns, render that column as a clickable hyperlink to
+    # the Jira ticket. The cell still shows the Issue Key text — clicking
+    # it opens the Jira ticket in a new tab. Keeps the table compact
+    # (no separate link column) while making drill-down one click away.
+    JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
+    preview_df = export_df[chosen_export_cols].copy()
+
+    # Find which of the chosen columns IS the Issue Key column (case-insensitive)
+    # so we can apply the LinkColumn config to it dynamically.
+    issue_key_col = None
+    for c in chosen_export_cols:
+        if c.lower().replace(" ", "") in ("issuekey", "issue_key", "key"):
+            issue_key_col = c
+            break
+
+    column_config = {}
+    if issue_key_col and issue_key_col in preview_df.columns:
+        # Build hyperlink URLs in-place so LinkColumn can render them.
+        # The display text is the original key value; the underlying value
+        # is the URL. Streamlit's LinkColumn lets us pass display_text as
+        # a callable to keep the key visible.
+        preview_df[issue_key_col] = preview_df[issue_key_col].apply(
+            lambda k: f"{JIRA_BASE_URL}{k}" if pd.notna(k) and str(k).strip() else None
+        )
+        # display_text uses regex on the URL to extract the issue key portion
+        column_config[issue_key_col] = st.column_config.LinkColumn(
+            issue_key_col,
+            help="Click to open this Jira in a new tab.",
+            display_text=r"https?://jira\.corp\.adobe\.com/browse/(.+)",
+        )
+
+    st.dataframe(
+        preview_df,
+        use_container_width=True,
+        height=380,
+        column_config=column_config,
+    )
 
     # Download button — Excel only (management prefers it).
     try:
@@ -3487,13 +4180,6 @@ with tab5:
                 how="Groups issues by month of resolution, counts per month, plots as a line chart with steel-blue area fill below.",
                 example="Each month becomes a point on the line — for example, Jan 2026: 32 issues, Feb 2026: 28 issues. The chart's hover tooltip shows the exact count per month.",
                 edge="Rows with missing Resolution Date are excluded.",
-            )),
-            ("customers", "Top customers by JIRA volume (bar chart)", dict(
-                what="Top 12 customers ranked by how many P2E Jiras they raised in the selected period.",
-                source="<code>JIRA_Created</code> sheet (a separate dataset from the quarter sheets). Uses the <code>Customer</code> column.",
-                how="Counts Jiras per Customer, sorts descending, keeps the top 12. The chart respects the same reporting period as the rest of the dashboard — selecting Q2 2026 shows top customers for Q2 only.",
-                example=(f"In <b>{_ex_period}</b>: {_ex_top_customers_text}." if _ex_top_customers_text else "Customers are ranked by Jira count for the selected period."),
-                edge="Customer entries are taken as-is from the source — different casings or formats (e.g. 'Microsoft - MSCOM' vs 'MICROSOFT - MSCOM') count as distinct customers because that's how the data team labels them upstream.",
             )),
         ],
     )

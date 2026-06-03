@@ -2585,76 +2585,6 @@ with tab1:
             chart_theme(fig)
             st.plotly_chart(fig, use_container_width=True, key="chart_06_volume")
 
-    # ─── Top 10 longest-running Jiras (resolution-based) ─────────────────
-    # A spotlight view of the 10 P2E Jiras that took the longest to resolve
-    # within the selected period. Resolution-based by design (matches the
-    # rest of the Snapshot tab); respects the period filter. No local
-    # filters — this is meant as a quick "what hurt us this period" view
-    # for leadership scanning. The Customers tab has the filter-capable
-    # version with open + closed mixed.
-    #
-    # Data source: df (period-filtered quarter-sheet data). Every row here
-    # has a Resolution Date because that's how the quarter sheets are scoped.
-    if not df.empty and "Creation Date" in df.columns and "Resolution Date" in df.columns:
-        section("Top 10 longest-running Jiras")
-
-        # Compute days to resolve. Negative or null days get filtered out
-        # because they indicate data issues we can't draw conclusions from.
-        lr = df.copy()
-        lr["Creation Date"] = pd.to_datetime(lr["Creation Date"], errors="coerce")
-        lr["Resolution Date"] = pd.to_datetime(lr["Resolution Date"], errors="coerce")
-        lr["Days to Resolve"] = (lr["Resolution Date"] - lr["Creation Date"]).dt.days
-        lr = lr[lr["Days to Resolve"].notna() & (lr["Days to Resolve"] >= 0)]
-
-        if lr.empty:
-            st.caption("No Jiras in the current period have valid date data for this calculation.")
-        else:
-            # Sort by Days to Resolve descending, take top 10
-            lr = lr.sort_values("Days to Resolve", ascending=False).head(10)
-
-            # Build the display frame with a clickable Jira link
-            JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
-            display_lr = lr.copy()
-            display_lr["Jira Link"] = display_lr["Issue Key"].apply(
-                lambda k: f"{JIRA_BASE_URL}{k}"
-            )
-            display_lr["Created"] = display_lr["Creation Date"].dt.strftime("%Y-%m-%d")
-            display_lr["Resolved"] = display_lr["Resolution Date"].dt.strftime("%Y-%m-%d")
-
-            # Use Priority_Short if it exists (cleaner), otherwise raw Priority
-            priority_col = "Priority_Short" if "Priority_Short" in display_lr.columns else "Priority"
-
-            # Select the columns we want in the order they should appear
-            show_cols = ["Issue Key", "Customer", priority_col, "Created", "Resolved", "Days to Resolve", "Jira Link"]
-            show_cols = [c for c in show_cols if c in display_lr.columns]
-
-            # Rename Priority_Short → Priority for display
-            display_df = display_lr[show_cols].rename(columns={"Priority_Short": "Priority"})
-
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                height=400,
-                column_config={
-                    "Jira Link": st.column_config.LinkColumn(
-                        "Open in Jira",
-                        display_text="🔗 View",
-                    ),
-                    "Days to Resolve": st.column_config.NumberColumn(
-                        "Days to Resolve",
-                        help="Time between Creation Date and Resolution Date.",
-                        format="%d days",
-                    ),
-                },
-                hide_index=True,
-            )
-
-            st.caption(
-                f"Showing the 10 longest-running Jiras in the selected period · "
-                f"sorted by days from Creation Date to Resolution Date · "
-                f"resolution-based (matches the rest of this tab)."
-            )
-
 # -- TAB 2: Quality -----------------------------------------------------------
 with tab2:
     col1, col2 = st.columns(2)
@@ -2804,6 +2734,70 @@ with tab2:
             fig.update_layout(xaxis_title="", yaxis_title="")
             chart_theme(fig)
             st.plotly_chart(fig, use_container_width=True, key="chart_12")
+
+    # ─── Top 10 longest-running Jiras ────────────────────────────────────
+    # Moved here from Snapshot per leadership feedback (Nikhila): the Age
+    # theme is more relevant to resolution-pattern analysis than to the
+    # period-level Snapshot story, so it lives on Quality now.
+    #
+    # A spotlight view of the 10 P2E Jiras that took the longest to resolve
+    # within the selected period. Resolution-based; respects the period
+    # filter. No local filters — quick "what hurt us this period" view.
+    # The Customers tab has the filter-capable version with open + closed.
+    if not df.empty and "Creation Date" in df.columns and "Resolution Date" in df.columns:
+        section("Top 10 longest-running Jiras")
+
+        # Compute days to resolve. Negative or null days get filtered out
+        # because they indicate data issues we can't draw conclusions from.
+        lr = df.copy()
+        lr["Creation Date"] = pd.to_datetime(lr["Creation Date"], errors="coerce")
+        lr["Resolution Date"] = pd.to_datetime(lr["Resolution Date"], errors="coerce")
+        lr["Days to Resolve"] = (lr["Resolution Date"] - lr["Creation Date"]).dt.days
+        lr = lr[lr["Days to Resolve"].notna() & (lr["Days to Resolve"] >= 0)]
+
+        if lr.empty:
+            st.caption("No Jiras in the current period have valid date data for this calculation.")
+        else:
+            # Sort by Days to Resolve descending, take top 10
+            lr = lr.sort_values("Days to Resolve", ascending=False).head(10)
+
+            # Build display frame with clickable Jira link
+            JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
+            display_lr = lr.copy()
+            display_lr["Jira Link"] = display_lr["Issue Key"].apply(
+                lambda k: f"{JIRA_BASE_URL}{k}"
+            )
+            display_lr["Created"] = display_lr["Creation Date"].dt.strftime("%Y-%m-%d")
+            display_lr["Resolved"] = display_lr["Resolution Date"].dt.strftime("%Y-%m-%d")
+
+            # Use Priority_Short if it exists (cleaner), otherwise raw Priority
+            priority_col = "Priority_Short" if "Priority_Short" in display_lr.columns else "Priority"
+            show_cols = ["Issue Key", "Customer", priority_col, "Created", "Resolved", "Days to Resolve", "Jira Link"]
+            show_cols = [c for c in show_cols if c in display_lr.columns]
+            display_df = display_lr[show_cols].rename(columns={"Priority_Short": "Priority"})
+
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                height=400,
+                column_config={
+                    "Jira Link": st.column_config.LinkColumn(
+                        "Open in Jira",
+                        display_text="🔗 View",
+                    ),
+                    "Days to Resolve": st.column_config.NumberColumn(
+                        "Days to Resolve",
+                        help="Time between Creation Date and Resolution Date.",
+                        format="%d days",
+                    ),
+                },
+                hide_index=True,
+            )
+
+            st.caption(
+                f"Showing the 10 longest-running Jiras in the selected period · "
+                f"sorted by days from Creation Date to Resolution Date."
+            )
 
 # -- TAB 3: Team --------------------------------------------------------------
 with tab3:

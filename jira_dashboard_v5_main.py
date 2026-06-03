@@ -11,7 +11,7 @@ import streamlit as st
 
 # -- Default path config (edit these if the file moves) -----------------------
 DEFAULT_FOLDER = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE = "JIRA_P2E_2026_label.xlsx"
+DEFAULT_FILE = "JIRA_P2E_2026_latest.xlsx"
 
 # -- Page config --------------------------------------------------------------
 st.set_page_config(
@@ -4365,7 +4365,7 @@ with tab4:
         if col not in default_export_cols:
             default_export_cols.append(col)
     for fallback in ["Summary", "Status", "Validity", "Type of Request", "Priority_Short",
-                     "Creator", "R&D Engineer", "Creation Date", "Resolution Date"]:
+                     "Creator", "R&D Engineer", "Creation Date", "Resolution Date", "Age (days)"]:
         if fallback in export_df.columns and fallback not in default_export_cols:
             default_export_cols.append(fallback)
 
@@ -4411,6 +4411,14 @@ with tab4:
             issue_key_col,
             help="Click to open this Jira in a new tab.",
             display_text=r"https?://jira\.corp\.adobe\.com/browse/(.+)",
+        )
+
+    # Format Age (days) nicely if it's in the selected columns
+    if "Age (days)" in preview_df.columns:
+        column_config["Age (days)"] = st.column_config.NumberColumn(
+            "Age (days)",
+            help="Days from Creation Date to Resolution Date. For Resolved-lens data, every row has a resolution date so this is always defined.",
+            format="%d days",
         )
 
     st.dataframe(

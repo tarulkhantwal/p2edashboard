@@ -11,7 +11,7 @@ import streamlit as st
 
 # -- Default path config (edit these if the file moves) -----------------------
 DEFAULT_FOLDER = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE = "JIRA_P2E_2026_latest.xlsx"
+DEFAULT_FILE = "JIRA_P2E_2026_label.xlsx"
 
 # -- Page config --------------------------------------------------------------
 st.set_page_config(
@@ -1289,6 +1289,437 @@ if is_reports_view:
                 f'</div>',
                 unsafe_allow_html=True,
             )
+
+        st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
+
+        # ─── Custom export builder (Created lens) ────────────────────────
+        # Mirrors the Data Explorer's query builder but operates on
+        # JIRA_Created data (open + closed Jiras). Supports filtering by
+        # any column including the new Labels column from Yash's pipeline.
+        # Includes a derived "Age (days)" column = (as-of date − Creation Date)
+        # so users can build queries like "Age > 60 days" to surface stale
+        # open work.
+        #
+        # Implementation note: this is a leaner build than the Resolved-lens
+        # Data Explorer (no separate column selector, no how-to card, just
+        # the working filter UI + export). Helpers are inlined here because
+        # the full Data Explorer's helpers are nested inside `with tab4:`
+        # which doesn't render on this lens.
+        section("Custom export builder")
+
+        # ─── Inline helpers (kept here because tab4's are out of scope) ──
+        _DATE_OPS_CB = ["on", "on or after", "on or before", "between"]
+        _LABEL_OPS_CB = ["has any of", "has none of"]
+        _NUMERIC_OPS_CB = ["equals", "greater than", "less than", "at least", "at most", "between"]
+        _TEXT_OPS_CB = ["is", "is not", "contains", "does not contain"]
+
+        def _is_date_col(frame, col):
+            return col in frame.columns and pd.api.types.is_datetime64_any_dtype(frame[col])
+
+        def _is_numeric_col(frame, col):
+            return (col in frame.columns
+                    and pd.api.types.is_numeric_dtype(frame[col])
+                    and not _is_date_col(frame, col))
+
+        def _is_labels_col(col):
+            return col.strip().lower() == "labels"
+
+        def _parse_labels_cell(val):
+            if pd.isna(val):
+                return []
+            s = str(val).strip()
+            if not s or s == "[]":
+                return []
+            try:
+                import ast as _ast
+                parsed = _ast.literal_eval(s)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+                return []
+            except Exception:
+                return []
+
+        def _build_label_opts(frame, col):
+            if col not in frame.columns:
+                return []
+            counter = {}
+            for v in frame[col].dropna():
+                for lbl in _parse_labels_cell(v):
+                    counter[lbl] = counter.get(lbl, 0) + 1
+            if not counter:
+                return []
+            sorted_items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+            return [f"{lbl} ({cnt})" for lbl, cnt in sorted_items]
+
+        def _strip_count(s):
+            if not s:
+                return ""
+            m = re.search(r"\s*\(\d+\)\s*$", str(s))
+            return s[:m.start()].strip() if m else str(s).strip()
+
+        def _cb_mask(frame, col, op, val):
+            """Mini condition_mask for the Created-lens builder."""
+            all_true = pd.Series(True, index=frame.index)
+            if col not in frame.columns or val is None:
+                return all_true
+            opl = (op or "").lower().strip()
+            # Date branch
+            if opl in ("on", "on or after", "on or before", "between") and _is_date_col(frame, col):
+                ser_d = pd.to_datetime(frame[col], errors="coerce").dt.date
+                try:
+                    if opl == "between":
+                        if not isinstance(val, (list, tuple)) or len(val) != 2:
+                            return all_true
+                        a, b = pd.to_datetime(val[0]).date(), pd.to_datetime(val[1]).date()
+                        if a > b: a, b = b, a
+                        return (ser_d >= a) & (ser_d <= b)
+                    tgt = pd.to_datetime(val).date()
+                    if opl == "on": return ser_d == tgt
+                    if opl == "on or after": return ser_d >= tgt
+                    if opl == "on or before": return ser_d <= tgt
+                except Exception:
+                    return all_true
+                return all_true
+            # Labels branch
+            if opl in ("has any of", "has none of") and _is_labels_col(col):
+                if not isinstance(val, (list, tuple)) or not val:
+                    return all_true
+                sel = {_strip_count(v).lower() for v in val if v}
+                if not sel:
+                    return all_true
+                row_match = frame[col].map(lambda c: bool({l.lower() for l in _parse_labels_cell(c)} & sel))
+                return row_match if opl == "has any of" else ~row_match
+            # Numeric branch
+            if opl in ("equals", "greater than", "less than", "at least", "at most", "between"):
+                try:
+                    ser_n = pd.to_numeric(frame[col], errors="coerce")
+                    if opl == "between":
+                        if not isinstance(val, (list, tuple)) or len(val) != 2:
+                            return all_true
+                        lo, hi = float(val[0]), float(val[1])
+                        if lo > hi: lo, hi = hi, lo
+                        return (ser_n >= lo) & (ser_n <= hi)
+                    t = float(val)
+                    if opl == "equals": return ser_n == t
+                    if opl == "greater than": return ser_n > t
+                    if opl == "less than": return ser_n < t
+                    if opl == "at least": return ser_n >= t
+                    if opl == "at most": return ser_n <= t
+                except (ValueError, TypeError):
+                    return all_true
+                return all_true
+            # Text branch (is/is not/contains)
+            if val == "":
+                return all_true
+            ser_t = frame[col].astype(str).str.strip()
+            val_t = str(val).strip()
+            if not val_t:
+                return all_true
+            if opl == "is": return ser_t.str.lower() == val_t.lower()
+            if opl == "is not": return ser_t.str.lower() != val_t.lower()
+            if opl == "contains": return ser_t.str.contains(val_t, case=False, na=False)
+            if opl == "does not contain": return ~ser_t.str.contains(val_t, case=False, na=False)
+            return all_true
+
+        # Build a working frame with the derived Age column
+        cb_df = df_jc.copy()
+        if "Resolution Date" in cb_df.columns:
+            cb_df["Resolution Date"] = pd.to_datetime(cb_df["Resolution Date"], errors="coerce")
+        # As-of date for Age: stable across reloads (latest activity in dataset)
+        _asof_candidates = [
+            cb_df["Resolution Date"].dropna().max() if "Resolution Date" in cb_df.columns else pd.NaT,
+            cb_df["Creation Date"].dropna().max(),
+            pd.Timestamp.today(),
+        ]
+        cb_asof = next((d for d in _asof_candidates if pd.notna(d)), pd.Timestamp.today())
+        cb_asof = pd.Timestamp(cb_asof).normalize()
+        # Age = (Resolution Date OR as-of) − Creation Date. For open Jiras,
+        # this keeps ticking until they're resolved.
+        if "Creation Date" in cb_df.columns:
+            _end = cb_df["Resolution Date"].fillna(cb_asof) if "Resolution Date" in cb_df.columns else cb_asof
+            cb_df["Age (days)"] = (_end - cb_df["Creation Date"]).dt.days
+
+        # ─── Match toggle (AND / OR) ─────────────────────────────────
+        cb_match_mode = st.radio(
+            "Match",
+            ["All conditions (AND)", "Any condition (OR)"],
+            horizontal=True,
+            key="cb_jc_match_mode",
+            label_visibility="collapsed",
+        )
+        cb_is_or = cb_match_mode.startswith("Any")
+
+        # Initialize a default filter row
+        if "cb_jc_filters" not in st.session_state:
+            st.session_state.cb_jc_filters = [{"column": "Priority", "op": "is", "value": "P1"}]
+
+        # Action buttons
+        bcols = st.columns([1, 1, 6])
+        with bcols[0]:
+            if st.button("+ Add condition", key="cb_jc_add"):
+                st.session_state.cb_jc_filters.append({"column": None, "op": None, "value": None})
+                st.rerun()
+        with bcols[1]:
+            if st.button("✕ Clear all", key="cb_jc_clear"):
+                st.session_state.cb_jc_filters = [{"column": "Priority", "op": "is", "value": "P1"}]
+                st.rerun()
+
+        # Available columns on JIRA_Created (filters out unhelpful ones)
+        cb_skip = {"Summary"}  # too long-form to filter by usefully
+        cb_columns = [c for c in cb_df.columns if c not in cb_skip]
+
+        # Helper to build distinct-value options for "is/is not" picker
+        def _cb_options(frame, col):
+            if col not in frame.columns:
+                return []
+            vals = frame[col].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
+            return sorted(vals)
+
+        # ─── Render filter rows ───────────────────────────────────────
+        for cb_i, cb_flt in enumerate(st.session_state.cb_jc_filters):
+            cb_row = st.columns([0.6, 2.2, 1.6, 3, 0.6])
+
+            with cb_row[0]:
+                connector = "Where" if cb_i == 0 else ("Or" if cb_is_or else "And")
+                color = CHART_TERRACOTTA_DEEP if cb_is_or and cb_i > 0 else MUTED
+                st.markdown(
+                    f'<div style="font-family:Inter,sans-serif;font-size:0.85rem;font-weight:700;'
+                    f'color:{color};padding:8px 0 0 0;text-align:right;">{connector}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Column picker
+            with cb_row[1]:
+                current_col = cb_flt.get("column") or cb_columns[0]
+                if current_col not in cb_columns:
+                    current_col = cb_columns[0]
+                col_choice = st.selectbox(
+                    "Column",
+                    cb_columns,
+                    index=cb_columns.index(current_col),
+                    key=f"cb_jc_col_{cb_i}",
+                    label_visibility="collapsed",
+                )
+                cb_flt["column"] = col_choice
+
+            # Determine column type for operator/value picker
+            _is_date = _is_date_col(cb_df, col_choice)
+            _is_labels = _is_labels_col(col_choice)
+            _is_numeric = _is_numeric_col(cb_df, col_choice) and not _is_date
+            if _is_date:
+                cb_ops = _DATE_OPS_CB
+            elif _is_labels:
+                cb_ops = _LABEL_OPS_CB
+            elif _is_numeric:
+                cb_ops = _NUMERIC_OPS_CB
+            else:
+                cb_ops = _TEXT_OPS_CB
+
+            # Operator picker
+            with cb_row[2]:
+                cur_op = cb_flt.get("op") or cb_ops[0]
+                if cur_op not in cb_ops:
+                    cur_op = cb_ops[0]
+                op_choice = st.selectbox(
+                    "Operator",
+                    cb_ops,
+                    index=cb_ops.index(cur_op),
+                    key=f"cb_jc_op_{cb_i}",
+                    label_visibility="collapsed",
+                )
+                cb_flt["op"] = op_choice
+
+            # Value picker — branches by column type
+            with cb_row[3]:
+                if _is_date:
+                    dseries = pd.to_datetime(cb_df[col_choice], errors="coerce").dropna()
+                    if not dseries.empty:
+                        d_min, d_max = dseries.min().date(), dseries.max().date()
+                    else:
+                        d_min = d_max = pd.Timestamp.today().date()
+                    prev = cb_flt.get("value")
+                    if op_choice == "between":
+                        if isinstance(prev, (list, tuple)) and len(prev) == 2:
+                            try:
+                                st_d = pd.to_datetime(prev[0]).date()
+                                en_d = pd.to_datetime(prev[1]).date()
+                            except Exception:
+                                st_d, en_d = d_min, d_max
+                        else:
+                            st_d, en_d = d_min, d_max
+                        sub = st.columns(2)
+                        with sub[0]:
+                            sd = st.date_input("From", value=st_d, min_value=d_min, max_value=d_max,
+                                               key=f"cb_jc_dstart_{cb_i}", label_visibility="collapsed")
+                        with sub[1]:
+                            ed = st.date_input("To", value=en_d, min_value=d_min, max_value=d_max,
+                                               key=f"cb_jc_dend_{cb_i}", label_visibility="collapsed")
+                        cb_val = (sd, ed)
+                    else:
+                        try:
+                            sd_def = pd.to_datetime(prev).date() if prev else d_max
+                        except Exception:
+                            sd_def = d_max
+                        cb_val = st.date_input("Date", value=sd_def, min_value=d_min, max_value=d_max,
+                                               key=f"cb_jc_date_{cb_i}", label_visibility="collapsed")
+                elif _is_numeric:
+                    nseries = pd.to_numeric(cb_df[col_choice], errors="coerce").dropna()
+                    n_min = float(nseries.min()) if not nseries.empty else 0.0
+                    n_max = float(nseries.max()) if not nseries.empty else 100.0
+                    prev = cb_flt.get("value")
+                    if op_choice == "between":
+                        if isinstance(prev, (list, tuple)) and len(prev) == 2:
+                            try:
+                                ns_def, ne_def = float(prev[0]), float(prev[1])
+                            except Exception:
+                                ns_def, ne_def = n_min, n_max
+                        else:
+                            ns_def, ne_def = n_min, n_max
+                        sub = st.columns(2)
+                        with sub[0]:
+                            ns = st.number_input("From", value=ns_def, step=1.0,
+                                                 key=f"cb_jc_nstart_{cb_i}", label_visibility="collapsed")
+                        with sub[1]:
+                            ne = st.number_input("To", value=ne_def, step=1.0,
+                                                 key=f"cb_jc_nend_{cb_i}", label_visibility="collapsed")
+                        cb_val = (ns, ne)
+                    else:
+                        try:
+                            single_n = float(prev) if isinstance(prev, (int, float)) else n_min
+                        except Exception:
+                            single_n = n_min
+                        cb_val = st.number_input(
+                            "Value", value=single_n, step=1.0,
+                            key=f"cb_jc_num_{cb_i}", label_visibility="collapsed",
+                            help=f"Range in data: {int(n_min)} to {int(n_max)}",
+                        )
+                elif _is_labels:
+                    label_opts = _build_label_opts(cb_df, col_choice)
+                    prev = cb_flt.get("value")
+                    if isinstance(prev, (list, tuple)):
+                        default_sel = [v for v in prev if v in label_opts]
+                    else:
+                        default_sel = []
+                    cb_val = st.multiselect(
+                        "Labels", label_opts, default=default_sel,
+                        key=f"cb_jc_labels_{cb_i}", label_visibility="collapsed",
+                        placeholder="Type to search labels…",
+                    )
+                elif op_choice in ("is", "is not"):
+                    opts = _cb_options(cb_df, col_choice)
+                    if not opts:
+                        opts = ["(blank)"]
+                    prev = cb_flt.get("value")
+                    idx = opts.index(prev) if prev in opts else 0
+                    cb_val = st.selectbox(
+                        "Value", opts, index=idx,
+                        key=f"cb_jc_val_{cb_i}", label_visibility="collapsed",
+                    )
+                else:
+                    cb_val = st.text_input(
+                        "Value", value=str(cb_flt.get("value") or ""),
+                        placeholder="Type a substring…",
+                        key=f"cb_jc_text_{cb_i}", label_visibility="collapsed",
+                    )
+                cb_flt["value"] = cb_val
+
+            # Remove button
+            with cb_row[4]:
+                if len(st.session_state.cb_jc_filters) > 1:
+                    if st.button("✕", key=f"cb_jc_rm_{cb_i}", help="Remove this condition"):
+                        st.session_state.cb_jc_filters.pop(cb_i)
+                        st.rerun()
+
+        # ─── Apply filters and show results ──────────────────────────
+        cb_masks = []
+        cb_active = []
+        for cb_flt in st.session_state.cb_jc_filters:
+            cc = cb_flt.get("column")
+            oo = cb_flt.get("op")
+            vv = cb_flt.get("value")
+            if cc and vv not in (None, "", "(choose a column first)"):
+                cb_masks.append(_cb_mask(cb_df, cc, oo, vv))
+                cb_active.append((cc, oo, vv))
+
+        if not cb_masks:
+            cb_filtered = cb_df
+        elif cb_is_or:
+            cb_combined = pd.Series(False, index=cb_df.index)
+            for m in cb_masks:
+                cb_combined = cb_combined | m
+            cb_filtered = cb_df[cb_combined]
+        else:
+            cb_combined = pd.Series(True, index=cb_df.index)
+            for m in cb_masks:
+                cb_combined = cb_combined & m
+            cb_filtered = cb_df[cb_combined]
+
+        # Match count
+        st.markdown(
+            f'<div style="font-family:Inter,sans-serif;font-size:0.8rem;color:{MUTED};margin:8px 0 6px 0;">'
+            f'<b style="color:{INK};font-size:1.05rem;font-family:\'IBM Plex Mono\',monospace;">{len(cb_filtered)}</b>'
+            f'<span style="margin-left:6px;">matching rows</span>'
+            f'<span style="margin-left:6px;color:{SUBTEXT};">of {len(cb_df)} total</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        if not cb_filtered.empty:
+            # Build preview with Issue Key as hyperlink
+            cb_preview = cb_filtered.copy()
+            # Show useful columns by default, but respect what's available
+            cb_default_cols = [c for c in [
+                "Issue Key", "Customer", "Priority", "Status", "Creation Date",
+                "Resolution Date", "Age (days)", "Labels", "Affects Version"
+            ] if c in cb_preview.columns]
+            cb_shown_cols = cb_default_cols
+
+            # Format dates as readable strings
+            for dc in ["Creation Date", "Resolution Date"]:
+                if dc in cb_preview.columns:
+                    cb_preview[dc] = pd.to_datetime(cb_preview[dc], errors="coerce").dt.strftime("%Y-%m-%d")
+                    cb_preview[dc] = cb_preview[dc].fillna("—")
+
+            # Hyperlink Issue Key
+            cb_col_config = {}
+            if "Issue Key" in cb_shown_cols:
+                cb_preview["Issue Key"] = cb_preview["Issue Key"].apply(
+                    lambda k: f"https://jira.corp.adobe.com/browse/{k}" if pd.notna(k) and str(k).strip() else None
+                )
+                cb_col_config["Issue Key"] = st.column_config.LinkColumn(
+                    "Issue Key",
+                    help="Click to open this Jira in a new tab.",
+                    display_text=r"https?://jira\.corp\.adobe\.com/browse/(.+)",
+                )
+            if "Age (days)" in cb_shown_cols:
+                cb_col_config["Age (days)"] = st.column_config.NumberColumn(
+                    "Age (days)",
+                    help=f"Days since creation. For open Jiras, computed against {cb_asof.date()}.",
+                    format="%d days",
+                )
+
+            st.dataframe(
+                cb_preview[cb_shown_cols],
+                use_container_width=True,
+                height=400,
+                column_config=cb_col_config,
+                hide_index=True,
+            )
+
+            # Download
+            try:
+                st.download_button(
+                    "⬇ Download Excel",
+                    make_xlsx_bytes(
+                        cb_filtered[[c for c in cb_shown_cols if c != "Issue Key" or True]].drop_duplicates(),
+                        sheet_name="Filtered_Created_Jiras"
+                    ),
+                    file_name="custom_filtered_created_jiras.xlsx",
+                    mime=XLSX_MIME,
+                    key="cb_jc_download",
+                )
+            except Exception as e:
+                st.error(f"Excel export failed: {e}")
 
         st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
 
@@ -3207,6 +3638,20 @@ with tab_customer:
 
 # -- TAB 4: Data explorer -----------------------------------------------------
 with tab4:
+    # Derived columns for the query builder: Age (days) is computed from
+    # Creation Date and Resolution Date. On the Resolved lens (where this
+    # tab lives), every row has a Resolution Date by design — Age represents
+    # "how long it took to resolve." Users can then build queries like
+    # "Age > 90 days" to find unusually slow resolutions.
+    #
+    # We mutate df in place because Data Explorer is the last tab and the
+    # column is harmless for the rest of the script (How we calculate tab
+    # doesn't read from df). This avoids a separate derivation copy.
+    if "Creation Date" in df.columns and "Resolution Date" in df.columns and "Age (days)" not in df.columns:
+        _creation = pd.to_datetime(df["Creation Date"], errors="coerce")
+        _resolution = pd.to_datetime(df["Resolution Date"], errors="coerce")
+        df["Age (days)"] = (_resolution - _creation).dt.days
+
     # Single tool — Custom export builder. (Filtered issues table was removed
     # in v9.2 because leadership wanted a single, focused export tool.)
     # Above the builder, a small "How to use" card explains the workflow so
@@ -3362,6 +3807,10 @@ with tab4:
     #   • "has any of"  → row matches if it has at least one of the picked labels (OR)
     #   • "has none of" → row matches if it has NONE of the picked labels (NOT)
     LABEL_OPERATORS = ["has any of", "has none of"]
+    # Numeric columns (like the derived Age (days) column) get arithmetic
+    # operators instead of text ones. Critical for "show me Jiras open > 30 days"
+    # style queries that the director uses when scanning backlog.
+    NUMERIC_OPERATORS = ["equals", "greater than", "less than", "at least", "at most", "between"]
 
     def is_date_column(frame: pd.DataFrame, column: str) -> bool:
         """True if the column has a datetime dtype (after parse_date_columns).
@@ -3370,6 +3819,17 @@ with tab4:
             return False
         try:
             return pd.api.types.is_datetime64_any_dtype(frame[column])
+        except Exception:
+            return False
+
+    def is_numeric_column(frame: pd.DataFrame, column: str) -> bool:
+        """True if the column has a numeric dtype (int/float). Used to gate
+        the numeric operator set + number-input value picker for derived
+        columns like Age (days)."""
+        if column not in frame.columns:
+            return False
+        try:
+            return pd.api.types.is_numeric_dtype(frame[column])
         except Exception:
             return False
 
@@ -3458,14 +3918,18 @@ with tab4:
             flt["column"] = col_choice
 
         # Switch operator + value widgets based on the column type.
-        # Three regimes: date column → DATE_OPERATORS, Labels column →
-        # LABEL_OPERATORS, anything else → standard text OPERATORS.
+        # Four regimes: date column → DATE_OPERATORS, Labels column →
+        # LABEL_OPERATORS, numeric column → NUMERIC_OPERATORS, anything
+        # else → standard text OPERATORS.
         col_is_date = is_date_column(df, col_choice)
         col_is_labels = is_labels_column(col_choice)
+        col_is_numeric = is_numeric_column(df, col_choice) and not col_is_date  # date is technically numeric
         if col_is_date:
             operators_for_col = DATE_OPERATORS
         elif col_is_labels:
             operators_for_col = LABEL_OPERATORS
+        elif col_is_numeric:
+            operators_for_col = NUMERIC_OPERATORS
         else:
             operators_for_col = OPERATORS
 
@@ -3557,6 +4021,64 @@ with tab4:
                         max_value=data_max,
                         key=f"flt_val_date_{i}",
                         label_visibility="collapsed",
+                    )
+            elif col_is_numeric:
+                # Numeric column → use st.number_input (or two for "between").
+                # Computes data min/max so the user knows the valid range.
+                num_series = pd.to_numeric(df[col_choice], errors="coerce").dropna()
+                if num_series.empty:
+                    data_min_n, data_max_n = 0.0, 100.0
+                else:
+                    data_min_n = float(num_series.min())
+                    data_max_n = float(num_series.max())
+                prev_val = flt.get("value")
+                if op_choice == "between":
+                    # Two number inputs for a range
+                    if isinstance(prev_val, (list, tuple)) and len(prev_val) == 2:
+                        try:
+                            start_default_n = float(prev_val[0])
+                            end_default_n = float(prev_val[1])
+                        except Exception:
+                            start_default_n, end_default_n = data_min_n, data_max_n
+                    else:
+                        start_default_n, end_default_n = data_min_n, data_max_n
+                    sub_cols = st.columns(2)
+                    with sub_cols[0]:
+                        start_n = st.number_input(
+                            "From",
+                            value=start_default_n,
+                            step=1.0,
+                            key=f"flt_val_num_start_{i}",
+                            label_visibility="collapsed",
+                        )
+                    with sub_cols[1]:
+                        end_n = st.number_input(
+                            "To",
+                            value=end_default_n,
+                            step=1.0,
+                            key=f"flt_val_num_end_{i}",
+                            label_visibility="collapsed",
+                        )
+                    val = (start_n, end_n)
+                else:
+                    # Single number input for equals/greater than/less than/at least/at most
+                    if isinstance(prev_val, (int, float)):
+                        single_default_n = float(prev_val)
+                    elif isinstance(prev_val, (list, tuple)):
+                        # User switched from "between" — collapse to first
+                        try:
+                            single_default_n = float(prev_val[0])
+                        except Exception:
+                            single_default_n = data_min_n
+                    else:
+                        single_default_n = data_min_n
+                    val = st.number_input(
+                        "Value",
+                        value=single_default_n,
+                        step=1.0,
+                        key=f"flt_val_num_{i}",
+                        label_visibility="collapsed",
+                        help=f"Range in data: {int(data_min_n)} to {int(data_max_n)}",
                     )
             elif col_is_labels:
                 # Labels column → searchable multi-select of labels with counts.
@@ -3679,6 +4201,36 @@ with tab4:
                 return row_matches
             else:  # "has none of"
                 return ~row_matches
+
+        # Numeric branch — runs when the operator is one of the numeric ops.
+        # Coerces both the column and the comparison value(s) to numbers,
+        # handles NaN gracefully (excludes rows where the column value
+        # can't be converted to a number).
+        if op in ("equals", "greater than", "less than", "at least", "at most", "between"):
+            try:
+                series_num = pd.to_numeric(frame[column], errors="coerce")
+                if op == "between":
+                    if not isinstance(value, (list, tuple)) or len(value) != 2:
+                        return all_true
+                    low = float(value[0])
+                    high = float(value[1])
+                    if low > high:
+                        low, high = high, low
+                    return (series_num >= low) & (series_num <= high)
+                target_num = float(value)
+                if op == "equals":
+                    return series_num == target_num
+                if op == "greater than":
+                    return series_num > target_num
+                if op == "less than":
+                    return series_num < target_num
+                if op == "at least":
+                    return series_num >= target_num
+                if op == "at most":
+                    return series_num <= target_num
+            except (ValueError, TypeError):
+                return all_true
+            return all_true
 
         # Text branch (existing logic)
         if value == "":

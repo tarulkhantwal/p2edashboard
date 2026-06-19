@@ -1669,7 +1669,7 @@ if is_reports_view:
             cb_preview = cb_filtered.copy()
             # Show useful columns by default, but respect what's available
             cb_default_cols = [c for c in [
-                "Issue Key", "Customer", "Priority", "Status", "Creation Date",
+                "Issue Key", "Summary", "Customer", "Priority", "Status", "Creation Date",
                 "Resolution Date", "Age (days)", "Labels", "Affects Version"
             ] if c in cb_preview.columns]
             cb_shown_cols = cb_default_cols
@@ -1982,7 +1982,7 @@ if is_reports_view:
                 )
                 page_slice["Created"] = page_slice["Creation Date"].dt.strftime("%Y-%m-%d")
 
-                show_cols = ["Issue Key", "Customer", "Priority", "Status", "Created", "Age (days)", "Jira Link"]
+                show_cols = ["Issue Key", "Summary", "Customer", "Priority", "Status", "Created", "Age (days)", "Jira Link"]
                 show_cols = [c for c in show_cols if c in page_slice.columns]
 
                 st.dataframe(
@@ -2027,6 +2027,106 @@ if is_reports_view:
                     f"Showing rows {start_idx + 1}–{min(end_idx, total_rows)} of {total_rows} · "
                     f"Age computed as days since Creation Date, anchored to {asof_date.date()}."
                 )
+
+        # ─── Top 10 longest-open P1s by Age (visualization) ──────────────
+        # Leadership signal chart: critical work that's been sitting too long.
+        # Per Nikhila's ask — kept as a visualization (not a table) so the
+        # message lands at a glance: "these P1s are hurting us right now."
+        # Customer name shown alongside Issue Key so leadership can scan and
+        # know who's waiting without needing a hover or a click.
+        #
+        # Data source: JIRA_Created (only source with open Jiras + Priority).
+        # Filter: Status NOT IN (Resolved, Closed, Deferred) AND Priority = P1.
+        # Sort: Age descending. Top 10.
+        st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
+        section("Top 10 longest-open P1s")
+
+        open_p1 = df_jc.copy()
+        open_p1["Creation Date"] = pd.to_datetime(open_p1["Creation Date"], errors="coerce")
+        if "Resolution Date" in open_p1.columns:
+            open_p1["Resolution Date"] = pd.to_datetime(open_p1["Resolution Date"], errors="coerce")
+        # Stable as-of date (same logic as the table above)
+        p1_asof_candidates = [
+            open_p1["Resolution Date"].dropna().max() if "Resolution Date" in open_p1.columns else pd.NaT,
+            open_p1["Creation Date"].dropna().max(),
+            pd.Timestamp.today(),
+        ]
+        p1_asof = next((d for d in p1_asof_candidates if pd.notna(d)), pd.Timestamp.today())
+        p1_asof = pd.Timestamp(p1_asof).normalize()
+
+        # Filter: open P1s
+        open_p1 = open_p1[
+            (open_p1["Priority"] == "P1") &
+            (~open_p1["Status"].isin(["Resolved", "Closed", "Deferred"]))
+        ].copy()
+        open_p1["Age (days)"] = (p1_asof - open_p1["Creation Date"]).dt.days
+        open_p1 = open_p1[open_p1["Age (days)"].notna() & (open_p1["Age (days)"] >= 0)]
+        open_p1 = open_p1.sort_values("Age (days)", ascending=False).head(10)
+
+        if open_p1.empty:
+            st.caption("No open P1 Jiras to show — the critical backlog is clear ✅")
+        else:
+            # Build chart labels: "ISSUE-KEY · Customer (truncated)".
+            # Truncation prevents long customer names (especially the
+            # "X\r\nY" multi-customer cells) from breaking the layout.
+            def _truncate(name, n=25):
+                if not isinstance(name, str):
+                    return "—"
+                # Some Customer cells have \r\n joining multiple names — just
+                # show the first one for the chart label, full name on hover
+                first_line = name.split("\r\n")[0].split("\n")[0].strip()
+                if len(first_line) > n:
+                    return first_line[:n].rstrip() + "…"
+                return first_line
+
+            bar_labels = [
+                f"{row['Issue Key']} · {_truncate(row.get('Customer', '—'))}"
+                for _, row in open_p1.iterrows()
+            ]
+            bar_values = open_p1["Age (days)"].tolist()
+
+            # Hover gives the full picture: full customer name, status, dates
+            hover_texts = []
+            for _, row in open_p1.iterrows():
+                cust_full = str(row.get("Customer", "—")).replace("\r\n", " / ").replace("\n", " / ")
+                created = row["Creation Date"].strftime("%Y-%m-%d") if pd.notna(row["Creation Date"]) else "—"
+                hover_texts.append(
+                    f"<b>{row['Issue Key']}</b><br>"
+                    f"Customer: {cust_full}<br>"
+                    f"Status: {row.get('Status', '—')}<br>"
+                    f"Created: {created}<br>"
+                    f"Age: <b>{int(row['Age (days)'])} days</b>"
+                )
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=bar_values,
+                y=bar_labels,
+                orientation="h",
+                marker=dict(color=CHART_TERRACOTTA_DEEP, line=dict(width=0)),
+                text=[f"<b>{int(v)} days</b>" for v in bar_values],
+                textposition="outside",
+                textfont=dict(color=INK, size=12, family="Inter"),
+                hovertext=hover_texts,
+                hoverinfo="text",
+                cliponaxis=False,
+            ))
+            fig.update_layout(
+                yaxis=dict(autorange="reversed", tickfont=dict(color=INK, size=12, family="Inter")),
+                xaxis_title="Days open",
+                yaxis_title="",
+                height=460,
+                showlegend=False,
+                margin=dict(l=10, r=80, t=20, b=40),
+            )
+            chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True, key="created_top10_open_p1")
+
+            st.caption(
+                f"Showing the {len(open_p1)} longest-open P1 Jiras · "
+                f"Age = days since Creation Date, anchored to {p1_asof.date()} · "
+                f"Customer name shown next to Issue Key. Hover for full details."
+            )
 
     # Stop here — none of the main dashboard renders in Created Jiras view.
     st.stop()
@@ -2772,7 +2872,7 @@ with tab2:
 
             # Use Priority_Short if it exists (cleaner), otherwise raw Priority
             priority_col = "Priority_Short" if "Priority_Short" in display_lr.columns else "Priority"
-            show_cols = ["Issue Key", "Customer", priority_col, "Created", "Resolved", "Days to Resolve", "Jira Link"]
+            show_cols = ["Issue Key", "Summary", "Customer", priority_col, "Created", "Resolved", "Days to Resolve", "Jira Link"]
             show_cols = [c for c in show_cols if c in display_lr.columns]
             display_df = display_lr[show_cols].rename(columns={"Priority_Short": "Priority"})
 
@@ -3601,7 +3701,7 @@ with tab_customer:
                     lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "—"
                 )
 
-                show_cols = ["Issue Key", "Customer", "Priority", "Status", "Created", "Resolved", "Days Open", "Jira Link"]
+                show_cols = ["Issue Key", "Summary", "Customer", "Priority", "Status", "Created", "Resolved", "Days Open", "Jira Link"]
                 show_cols = [c for c in show_cols if c in display_df.columns]
 
                 st.dataframe(

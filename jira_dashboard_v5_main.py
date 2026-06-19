@@ -11,7 +11,7 @@ import streamlit as st
 
 # -- Default path config (edit these if the file moves) -----------------------
 DEFAULT_FOLDER = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE = "JIRA_P2E_2026_label.xlsx"
+DEFAULT_FILE = "JIRA_P2E_2026_label_latest.xlsx"
 
 # -- Page config --------------------------------------------------------------
 st.set_page_config(

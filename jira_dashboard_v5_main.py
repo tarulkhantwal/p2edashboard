@@ -2687,131 +2687,77 @@ with tab1:
 
 # -- TAB 2: Quality -----------------------------------------------------------
 with tab2:
-    col1, col2 = st.columns(2)
+    # ─── Resolution time trend (full width) ──────────────────────────────
+    # Used to share Quality tab's top row with the Classification accuracy
+    # chart, but that chart was retired in v9.7 since the
+    # `Correct / Incorrect classification? RFH/Bug` column is no longer
+    # populated in Yash's latest export. Resolution time trend now gets
+    # the full row, which is better for reading the monthly bars anyway.
+    section("Resolution time trend")
+    # Calculates avg & median days from Creation Date → Resolution Date,
+    # bucketed by resolution month. Tells leadership "are we getting faster?"
+    if "Creation Date" in df.columns and "Resolution Date" in df.columns:
+        res_df = df.dropna(subset=["Creation Date", "Resolution Date"]).copy()
+        res_df["DaysToResolve"] = (
+            res_df["Resolution Date"] - res_df["Creation Date"]
+        ).dt.days
+        res_df = res_df[res_df["DaysToResolve"] >= 0]
 
-    with col1:
-        section("Resolution time trend")
-        # Calculates avg & median days from Creation Date → Resolution Date,
-        # bucketed by resolution month. Tells leadership "are we getting faster?"
-        if "Creation Date" in df.columns and "Resolution Date" in df.columns:
-            res_df = df.dropna(subset=["Creation Date", "Resolution Date"]).copy()
-            res_df["DaysToResolve"] = (
-                res_df["Resolution Date"] - res_df["Creation Date"]
-            ).dt.days
-            res_df = res_df[res_df["DaysToResolve"] >= 0]
-
-            if not res_df.empty:
-                res_df["ResMonth"] = res_df["Resolution Date"].dt.to_period("M")
-                trend = (
-                    res_df.groupby("ResMonth")["DaysToResolve"]
-                    .agg(mean_days="mean", median_days="median", count="size")
-                    .reset_index()
-                    .sort_values("ResMonth")
-                )
-                trend["Label"] = trend["ResMonth"].dt.to_timestamp().dt.strftime("%b %Y")
-
-                fig = go.Figure()
-                # Soft fill under median line
-                fig.add_trace(go.Scatter(
-                    x=trend["Label"],
-                    y=trend["median_days"],
-                    mode="lines",
-                    line=dict(color=CHART_INDIGO, width=0),
-                    fill="tozeroy",
-                    fillcolor="rgba(124, 111, 232, 0.10)",
-                    hoverinfo="skip",
-                    showlegend=False,
-                ))
-                fig.add_trace(go.Scatter(
-                    x=trend["Label"],
-                    y=trend["median_days"],
-                    mode="lines+markers+text",
-                    name="Median days",
-                    line=dict(color=CHART_INDIGO_DEEP, width=2.5, shape="spline", smoothing=0.6),
-                    marker=dict(size=9, color=CHART_INDIGO_DEEP, line=dict(color="#FFFFFF", width=2)),
-                    text=[f"{int(d)}d" for d in trend["median_days"]],
-                    textposition="top center",
-                    textfont=dict(color=INK, size=12, family="Inter", weight=700),
-                    hovertemplate="<b>%{x}</b><br>Median: %{y:.0f} days<extra></extra>",
-                    cliponaxis=False,
-                ))
-                # Mean as a lighter dashed reference line
-                fig.add_trace(go.Scatter(
-                    x=trend["Label"],
-                    y=trend["mean_days"],
-                    mode="lines",
-                    name="Mean days",
-                    line=dict(color=CHART_HONEY, width=1.8, dash="dot"),
-                    hovertemplate="<b>%{x}</b><br>Mean: %{y:.0f} days<extra></extra>",
-                ))
-                fig.update_layout(
-                    xaxis_title="",
-                    yaxis_title="",
-                    yaxis=dict(rangemode="tozero"),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                )
-                chart_theme(fig)
-                st.plotly_chart(fig, use_container_width=True, key="chart_10")
-            else:
-                st.info("Not enough date data to compute resolution time trend.")
-
-    with col2:
-        section("Classification accuracy")
-        # How often was the original RFH-vs-Bug classification correct?
-        # Broken down by Type of Request — tells you if bugs are harder to
-        # classify than RFHs (or vice versa).
-        rfh_col = find_column(df, ["Correct / Incorrect classification? RFH/Bug"])
-        if rfh_col and "Type of Request" in df.columns:
-            ct = (
-                df.assign(
-                    _t=df["Type of Request"].fillna("(blank)").astype(str).str.strip(),
-                    _c=df[rfh_col].fillna("(blank)").astype(str).str.strip(),
-                )
-                .groupby(["_t", "_c"]).size()
-                .reset_index(name="Count")
-                .rename(columns={"_t": "Type", "_c": "Classification"})
+        if not res_df.empty:
+            res_df["ResMonth"] = res_df["Resolution Date"].dt.to_period("M")
+            trend = (
+                res_df.groupby("ResMonth")["DaysToResolve"]
+                .agg(mean_days="mean", median_days="median", count="size")
+                .reset_index()
+                .sort_values("ResMonth")
             )
-            type_totals = ct.groupby("Type")["Count"].sum().sort_values(ascending=True)
-            type_order = type_totals.index.tolist()
-
-            class_colors = {"Correct": CHART_EMERALD, "Incorrect": CHART_TERRACOTTA_DEEP, "(blank)": "#C8C2B5"}
-            stack_order = ["Correct", "Incorrect", "(blank)"]
-            available = [c for c in stack_order if c in ct["Classification"].unique()]
+            trend["Label"] = trend["ResMonth"].dt.to_timestamp().dt.strftime("%b %Y")
 
             fig = go.Figure()
-            for c in available:
-                subset = ct[ct["Classification"] == c].set_index("Type").reindex(type_order).fillna(0)
-                fig.add_trace(go.Bar(
-                    name=c,
-                    y=type_order,
-                    x=subset["Count"],
-                    orientation="h",
-                    marker=dict(color=class_colors.get(c, "#A89DEF"), line=dict(width=0)),
-                    text=[int(v) if v > 0 else "" for v in subset["Count"]],
-                    textposition="inside",
-                    insidetextanchor="middle",
-                    textfont=dict(color="#FFFFFF", size=12, family="Inter", weight=700),
-                    hovertemplate="<b>%{y}</b><br>" + c + ": <b>%{x}</b><extra></extra>",
-                ))
-            for t in type_order:
-                total = int(type_totals[t])
-                fig.add_annotation(
-                    x=total, y=t, text=f"<b>{total}</b>", showarrow=False,
-                    xanchor="left", xshift=8,
-                    font=dict(color=INK, size=13, family="Inter"),
-                )
+            # Soft fill under median line
+            fig.add_trace(go.Scatter(
+                x=trend["Label"],
+                y=trend["median_days"],
+                mode="lines",
+                line=dict(color=CHART_INDIGO, width=0),
+                fill="tozeroy",
+                fillcolor="rgba(124, 111, 232, 0.10)",
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+            fig.add_trace(go.Scatter(
+                x=trend["Label"],
+                y=trend["median_days"],
+                mode="lines+markers+text",
+                name="Median days",
+                line=dict(color=CHART_INDIGO_DEEP, width=2.5, shape="spline", smoothing=0.6),
+                marker=dict(size=9, color=CHART_INDIGO_DEEP, line=dict(color="#FFFFFF", width=2)),
+                text=[f"{int(d)}d" for d in trend["median_days"]],
+                textposition="top center",
+                textfont=dict(color=INK, size=12, family="Inter", weight=700),
+                hovertemplate="<b>%{x}</b><br>Median: %{y:.0f} days<extra></extra>",
+                cliponaxis=False,
+            ))
+            # Mean as a lighter dashed reference line
+            fig.add_trace(go.Scatter(
+                x=trend["Label"],
+                y=trend["mean_days"],
+                mode="lines",
+                name="Mean days",
+                line=dict(color=CHART_HONEY, width=1.8, dash="dot"),
+                hovertemplate="<b>%{x}</b><br>Mean: %{y:.0f} days<extra></extra>",
+            ))
             fig.update_layout(
-                barmode="stack",
-                yaxis_title="", xaxis_title="",
-                yaxis=dict(tickfont=dict(color=INK, size=13, family="Inter")),
-                xaxis=dict(showgrid=True, gridcolor=GRID, range=[0, (max(type_totals) * 1.15 if len(type_totals) else 1)]),
+                xaxis_title="",
+                yaxis_title="",
+                yaxis=dict(rangemode="tozero"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                bargap=0.35,
             )
             chart_theme(fig)
-            st.plotly_chart(fig, use_container_width=True, key="chart_11")
+            st.plotly_chart(fig, use_container_width=True, key="chart_10")
+        else:
+            st.info("Not enough date data to compute resolution time trend.")
 
-    # Row 2: Scope for deflection alone (left half, right half empty for breathing room)
     col3, col4 = st.columns(2)
 
     with col3:
@@ -4852,13 +4798,6 @@ with tab5:
                     "Two trend lines descending from left to right.",
                 edge="Issues with missing Creation Date or Resolution Date are excluded. "
                     "Negative or zero day counts (impossible by data) are clipped to 0 to avoid misleading the chart.",
-            )),
-            ("classacc", "Classification accuracy (stacked bar)", dict(
-                what="Per Type of Request (Bug, RFH), shows what fraction were classified Correctly vs Incorrectly.",
-                source="<code>Type of Request</code> and <code>Correct / Incorrect classification? RFH/Bug</code> columns.",
-                how="Cross-tabulates Type × Correct/Incorrect, then plots stacked bar. Each bar's full height is the type's total; the green segment is Correct, red is Incorrect.",
-                example=f"In the current view — Bug: <b>{_ex_bug_correct} Correct + {_ex_bug_incorrect} Incorrect</b> = <b>{_ex_bug_acc}% accuracy</b>. RFH: <b>{_ex_rfh_correct} Correct + {_ex_rfh_incorrect} Incorrect</b> = <b>{_ex_rfh_acc}% accuracy</b>.",
-                edge="Rows where the classification cell is blank or has any value other than 'Correct'/'Incorrect' are excluded from this chart.",
             )),
             ("scope", "Scope for deflection (bar chart)", dict(
                 what="Counts of issues categorized as deflectable (Yes), not deflectable (No), or partially (Yes/No).",

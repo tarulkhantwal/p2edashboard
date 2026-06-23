@@ -2845,6 +2845,111 @@ with tab2:
                 f"sorted by days from Creation Date to Resolution Date."
             )
 
+    # ─── Valid / Invalid Jiras list ──────────────────────────────────────
+    # Per team feedback: a paginated drill-down list of either Valid or
+    # Invalid Jiras with Root Cause Resolution, Type of Request, Resolution
+    # columns. Toggle between the two views via a radio control.
+    #
+    # Defaults to Valid (the larger group — most Jiras land here). Invalid
+    # is the smaller anomaly group worth scanning when investigating
+    # classification issues. Both views respect the period filter.
+    #
+    # Pagination: 10 rows per page with Previous/Next buttons + page counter.
+    # Consistent with the "Open Jiras by age" table on the Created lens.
+    section("Valid / Invalid Jiras")
+
+    if "Validity" not in df.columns:
+        st.caption("Validity column not available in the current dataset.")
+    else:
+        # Toggle: which subset to show
+        vi_choice = st.radio(
+            "View",
+            ["Valid", "Invalid"],
+            index=0,  # Default to Valid
+            horizontal=True,
+            key="vi_toggle",
+            label_visibility="collapsed",
+        )
+
+        # Filter the period-resolved frame to the chosen subset
+        vi_df = df[df["Validity"] == vi_choice].copy()
+        # Sort by Resolution Date descending (most recent first)
+        if "Resolution Date" in vi_df.columns:
+            vi_df["Resolution Date"] = pd.to_datetime(vi_df["Resolution Date"], errors="coerce")
+            vi_df = vi_df.sort_values("Resolution Date", ascending=False)
+
+        if vi_df.empty:
+            st.caption(f"No {vi_choice} Jiras in the current period.")
+        else:
+            # Pagination — same pattern as Open Jiras by age table
+            VI_PAGE_SIZE = 10
+            vi_total = len(vi_df)
+            vi_total_pages = (vi_total - 1) // VI_PAGE_SIZE + 1
+
+            # Page state — separate per toggle choice so each remembers its own page,
+            # and resets when user flips the toggle if their current page exceeds bounds
+            page_key = f"vi_page_{vi_choice.lower()}"
+            if page_key not in st.session_state:
+                st.session_state[page_key] = 1
+            if st.session_state[page_key] > vi_total_pages:
+                st.session_state[page_key] = 1
+            vi_page = st.session_state[page_key]
+
+            vi_start = (vi_page - 1) * VI_PAGE_SIZE
+            vi_end = vi_start + VI_PAGE_SIZE
+            vi_slice = vi_df.iloc[vi_start:vi_end].copy()
+
+            # Build display: Issue Key as clickable hyperlink + the 3 requested columns
+            JIRA_BASE_URL = "https://jira.corp.adobe.com/browse/"
+            vi_slice["Issue Key"] = vi_slice["Issue Key"].apply(
+                lambda k: f"{JIRA_BASE_URL}{k}" if pd.notna(k) and str(k).strip() else None
+            )
+
+            # Only the columns the team asked for + Issue Key for navigation
+            vi_cols = ["Issue Key", "Root Cause Resolution", "Type of Request", "Resolution"]
+            vi_cols = [c for c in vi_cols if c in vi_slice.columns]
+
+            st.dataframe(
+                vi_slice[vi_cols],
+                use_container_width=True,
+                height=420,
+                column_config={
+                    "Issue Key": st.column_config.LinkColumn(
+                        "Issue Key",
+                        help="Click to open this Jira in a new tab.",
+                        display_text=r"https?://jira\.corp\.adobe\.com/browse/(.+)",
+                    ),
+                },
+                hide_index=True,
+            )
+
+            # Pagination controls
+            vcols = st.columns([1, 2, 1])
+            with vcols[0]:
+                if st.button("← Previous", key=f"vi_prev_{vi_choice.lower()}",
+                             disabled=(vi_page <= 1), use_container_width=True):
+                    st.session_state[page_key] = max(1, vi_page - 1)
+                    st.rerun()
+            with vcols[1]:
+                st.markdown(
+                    f'<div style="text-align:center;font-family:Inter,sans-serif;'
+                    f'font-size:0.9rem;color:{SUBTEXT};padding:8px 0;">'
+                    f'Page <b style="color:{INK}">{vi_page}</b> of {vi_total_pages} · '
+                    f'<b style="color:{INK}">{vi_total}</b> {vi_choice} Jira(s) in this period'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with vcols[2]:
+                if st.button("Next →", key=f"vi_next_{vi_choice.lower()}",
+                             disabled=(vi_page >= vi_total_pages), use_container_width=True):
+                    st.session_state[page_key] = min(vi_total_pages, vi_page + 1)
+                    st.rerun()
+
+            st.caption(
+                f"Showing rows {vi_start + 1}–{min(vi_end, vi_total)} of {vi_total} · "
+                f"sorted by Resolution Date (most recent first)."
+            )
+
 # -- TAB 3: Team --------------------------------------------------------------
 with tab3:
     col1, col2 = st.columns(2)
